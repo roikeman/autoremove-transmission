@@ -19,7 +19,7 @@ A self-hosted web app that connects to a [Transmission](https://transmissionbt.c
 ## Quick Start
 
 ```bash
-git clone https://github.com/froike/autoremove-transmission.git
+git clone https://github.com/roikeman/autoremove-transmission.git
 cd autoremove-transmission
 ```
 
@@ -50,7 +50,7 @@ Open `http://localhost:5000`
 ```yaml
 services:
   transmission-checker:
-    image: ghcr.io/froike/autoremove-transmission:latest
+    image: ghcr.io/roikeman/autoremove-transmission:latest
     ports:
       - "5000:5000"
     volumes:

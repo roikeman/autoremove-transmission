@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: froike/autoremove-transmission
+  IMAGE_NAME: roikeman/autoremove-transmission
 
 jobs:
   build-and-push:
