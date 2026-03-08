@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  transmission-checker:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - /share:/share:ro          # 12tb-share — same path as Transmission, read-only
+      - ./config:/config          # persisted settings (config.json)
+    restart: unless-stopped

@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Transmission Cleaner</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c6af7'/%3E%3Cstop offset='1' stop-color='%235b8dee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M7 10h18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z' fill='none' stroke='white' stroke-width='1.8'/%3E%3Ccircle cx='22' cy='16' r='1.5' fill='white'/%3E%3Ccircle cx='18' cy='16' r='1.5' fill='rgba(255,255,255,0.5)'/%3E%3Cline x1='8' y1='13' x2='13' y2='13' stroke='rgba(255,255,255,0.6)' stroke-width='1.5' stroke-linecap='round'/%3E%3Cline x1='8' y1='16' x2='13' y2='16' stroke='rgba(255,255,255,0.4)' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    :root {
+      --bg:         #0d0d18;
+      --surface:    #16162a;
+      --surface2:   #1e1e35;
+      --border:     rgba(255,255,255,0.07);
+      --accent:     #7c6af7;
+      --accent2:    #5b8dee;
+      --danger:     #e05c5c;
+      --text-muted: rgba(255,255,255,0.45);
+    }
+    * { box-sizing: border-box; }
+    body { background: var(--bg); color: #e8e8f0; font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+
+    /* Header */
+    .app-header {
+      background: linear-gradient(135deg, #1a1040 0%, #0f1a30 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 2rem;
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    }
+    .app-title { display: flex; align-items: center; gap: .75rem; font-size: 1.15rem; font-weight: 600; letter-spacing: .01em; }
+    .app-title .icon-wrap {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center; font-size: 1rem;
+    }
+
+    /* Stats bar */
+    .stats-bar {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: .75rem 2rem; display: flex; align-items: center; gap: 2rem; flex-wrap: wrap;
+    }
+    .stat-item { display: flex; align-items: center; gap: .5rem; font-size: .85rem; }
+    .stat-value { font-weight: 600; font-size: .95rem; }
+    .stat-label { color: var(--text-muted); }
+    .badge-pill {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff; border-radius: 999px; padding: .2em .65em; font-size: .75rem; font-weight: 600;
+    }
+
+    .main-content { padding: 1.5rem 2rem; }
+
+    /* Table card */
+    .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+    .table-scroll { max-height: calc(100vh - 220px); overflow-y: auto; overflow-x: auto; }
+    .table-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+    .table-scroll::-webkit-scrollbar-track { background: transparent; }
+    .table-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+
+    table { margin: 0; border-collapse: collapse; width: 100%; min-width: 700px; }
+
+    thead th {
+      background: var(--surface2);
+      color: var(--text-muted);
+      font-size: .72rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+      padding: .75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 1;
+      white-space: nowrap;
+      user-select: none;
+    }
+    thead th.sortable { cursor: pointer; }
+    thead th.sortable:hover { color: rgba(255,255,255,.75); background: #252540; }
+    thead th.sort-active { color: #a89df9; }
+    .sort-icon { margin-left: .3rem; font-size: .7rem; opacity: .6; }
+    thead th.sort-active .sort-icon { opacity: 1; color: var(--accent); }
+
+    tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(255,255,255,0.03); }
+    tbody tr.deleting { opacity: 0; transform: translateX(30px); transition: opacity .35s ease, transform .35s ease; }
+    tbody td { padding: .85rem 1.25rem; vertical-align: middle; }
+
+    .torrent-name { font-weight: 500; font-size: .9rem; line-height: 1.4; }
+    .torrent-path { font-size: .76rem; color: var(--text-muted); margin-top: .15rem; }
+
+    .size-badge {
+      background: rgba(124,106,247,.15); color: #a89df9;
+      border: 1px solid rgba(124,106,247,.25);
+      border-radius: 6px; padding: .25em .6em; font-size: .8rem; font-weight: 600; white-space: nowrap;
+    }
+    .date-text { font-size: .82rem; white-space: nowrap; }
+    .date-sub  { font-size: .72rem; color: var(--text-muted); margin-top: .1rem; }
+
+    .tracker-chip {
+      display: inline-block;
+      background: rgba(91,141,238,.12); border: 1px solid rgba(91,141,238,.2);
+      color: #7aabf5; border-radius: 5px; padding: .15em .5em;
+      font-size: .74rem; white-space: nowrap;
+    }
+    .tracker-more { font-size: .72rem; color: var(--text-muted); margin-left: .3rem; }
+
+    /* Buttons */
+    .btn-refresh {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .45rem .9rem; font-size: .85rem;
+      display: flex; align-items: center; gap: .4rem;
+      transition: background .15s, border-color .15s;
+    }
+    .btn-refresh:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); color: #fff; }
+    .btn-refresh:disabled { opacity: .5; pointer-events: none; }
+
+    .btn-delete {
+      background: rgba(224,92,92,.1); border: 1px solid rgba(224,92,92,.25); color: #e05c5c;
+      border-radius: 7px; padding: .3rem .55rem; font-size: .85rem; line-height: 1;
+      transition: background .15s, border-color .15s, transform .1s; cursor: pointer;
+    }
+    .btn-delete:hover { background: rgba(224,92,92,.22); border-color: rgba(224,92,92,.5); transform: scale(1.05); }
+    .btn-delete:active { transform: scale(.96); }
+    .btn-delete:disabled { opacity: .4; pointer-events: none; }
+
+    /* Modal */
+    .modal-content { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; color: #e8e8f0; }
+    .modal-header { border-bottom: 1px solid var(--border); padding: 1.25rem 1.5rem; }
+    .modal-footer { border-top: 1px solid var(--border); padding: 1rem 1.5rem; }
+    .modal-title { font-weight: 600; display: flex; align-items: center; gap: .5rem; }
+    .modal-title .bi { color: var(--danger); }
+    .modal-body { padding: 1.25rem 1.5rem; }
+    .torrent-info-box {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+      padding: .9rem 1.1rem; margin-top: .75rem;
+    }
+    .torrent-info-box .name { font-weight: 600; font-size: .95rem; margin-bottom: .3rem; word-break: break-word; }
+    .torrent-info-box .meta { color: var(--text-muted); font-size: .8rem; }
+    .warning-text { color: #f0a060; font-size: .85rem; margin-top: .9rem; display: flex; align-items: center; gap: .4rem; }
+    .modal-error { color: #e05c5c; font-size: .83rem; margin-top: .6rem; display: none; }
+    .btn-confirm-delete {
+      background: var(--danger); border: none; color: #fff; border-radius: 8px;
+      padding: .5rem 1.25rem; font-size: .88rem; font-weight: 600;
+      transition: background .15s, transform .1s;
+    }
+    .btn-confirm-delete:hover { background: #c94a4a; transform: scale(1.02); }
+    .btn-confirm-delete:disabled { opacity: .6; pointer-events: none; }
+    .btn-cancel {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .5rem 1.1rem; font-size: .88rem;
+    }
+    .btn-cancel:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+    .empty-state { padding: 3rem; text-align: center; color: var(--text-muted); }
+    .empty-state .bi { font-size: 2.5rem; margin-bottom: .75rem; display: block; opacity: .4; }
+    .spin { animation: spin .7s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .alert-error {
+      background: rgba(224,92,92,.12); border: 1px solid rgba(224,92,92,.3); color: #f0a0a0;
+      border-radius: 10px; padding: .75rem 1.1rem; font-size: .88rem; margin-bottom: 1rem; display: none;
+    }
+  </style>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">
+    <div class="icon-wrap"><i class="bi bi-hdd-fill text-white"></i></div>
+    Transmission Cleaner
+  </div>
+  <div style="display:flex;gap:.5rem">
+    <button class="btn-refresh" id="refreshBtn" onclick="loadData()">
+      <i class="bi bi-arrow-clockwise" id="refreshIcon"></i>
+      Refresh
+    </button>
+    <a href="/settings" class="btn-refresh" style="text-decoration:none" title="Settings">
+      <i class="bi bi-gear"></i>
+    </a>
+  </div>
+</header>
+
+<div class="stats-bar" id="statsBar" style="display:none!important">
+  <div class="stat-item">
+    <span class="stat-label">Deletable torrents</span>
+    <span class="badge-pill" id="statCount">0</span>
+  </div>
+  <div class="stat-item">
+    <span class="stat-label">Reclaimable space</span>
+    <span class="stat-value" id="statSize" style="color:#a89df9">—</span>
+  </div>
+</div>
+
+<main class="main-content">
+  <div class="alert-error" id="errorBox"></div>
+
+  <div class="table-card">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="sortable" data-col="name" data-type="str">
+              Torrent <i class="bi bi-chevron-expand sort-icon"></i>
+            </th>
+            <th class="sortable" data-col="addedDate" data-type="num" style="width:130px">
+              Added <i class="bi bi-chevron-expand sort-icon"></i>
+            </th>
+            <th class="sortable" data-col="tracker" data-type="str" style="width:160px">
+              Trackers <i class="bi bi-chevron-expand sort-icon"></i>
+            </th>
+            <th class="sortable" data-col="totalSize" data-type="num" style="width:115px">
+              Size <i class="bi bi-chevron-expand sort-icon"></i>
+            </th>
+            <th style="width:56px"></th>
+          </tr>
+        </thead>
+        <tbody id="torrentBody">
+          <tr><td colspan="5"><div class="empty-state"><i class="bi bi-arrow-repeat spin"></i>Loading…</div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<!-- Delete modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-trash3-fill"></i> Remove torrent</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p style="margin:0;font-size:.9rem;color:rgba(255,255,255,.7)">Are you sure you want to remove this torrent and <strong style="color:#e8e8f0">delete all its media files</strong>?</p>
+        <div class="torrent-info-box">
+          <div class="name" id="modalName"></div>
+          <div class="meta" id="modalMeta"></div>
+        </div>
+        <div class="warning-text"><i class="bi bi-exclamation-triangle-fill"></i> This action cannot be undone.</div>
+        <div class="modal-error" id="modalError"></div>
+      </div>
+      <div class="modal-footer" style="gap:.5rem">
+        <button class="btn-cancel" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn-confirm-delete" id="confirmDeleteBtn" onclick="executeDelete()">
+          <i class="bi bi-trash3"></i> Delete permanently
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let _pendingId   = null;
+let _modal       = null;
+let _rowSizes    = {};
+let _allTorrents = [];
+let _sortCol     = "totalSize";
+let _sortDir     = -1; // -1 = desc, 1 = asc
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function formatBytes(bytes) {
+  const u = ["B","KB","MB","GB","TB"];
+  let i = 0;
+  while (bytes >= 1024 && i < u.length - 1) { bytes /= 1024; i++; }
+  return bytes.toFixed(2) + "\u00a0" + u[i];
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function formatDate(ts) {
+  if (!ts) return { line1: "—", line2: "" };
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const diffDays = Math.floor((now - d) / 86400000);
+  let rel;
+  if      (diffDays === 0)  rel = "Today";
+  else if (diffDays === 1)  rel = "Yesterday";
+  else if (diffDays < 7)   rel = diffDays + "d ago";
+  else if (diffDays < 30)  rel = Math.floor(diffDays / 7) + "w ago";
+  else if (diffDays < 365) rel = Math.floor(diffDays / 30) + "mo ago";
+  else                     rel = Math.floor(diffDays / 365) + "y ago";
+  const abs = d.toLocaleDateString(undefined, { year:"numeric", month:"short", day:"numeric" });
+  return { line1: rel, line2: abs };
+}
+
+function trackerHost(url) {
+  // extract hostname from http:// or udp:// tracker URLs
+  const m = url.match(/[a-z]+:\/\/([^/:]+)/i);
+  return m ? m[1].replace(/^www\./, "") : url;
+}
+
+function renderTrackers(urls) {
+  if (!urls || urls.length === 0) return '<span style="color:var(--text-muted);font-size:.8rem">—</span>';
+  const hosts = [...new Set(urls.map(trackerHost))];
+  const first = `<span class="tracker-chip">${esc(hosts[0])}</span>`;
+  const more  = hosts.length > 1 ? `<span class="tracker-more">+${hosts.length - 1}</span>` : "";
+  return first + more;
+}
+
+// ── Sort ─────────────────────────────────────────────────────────────────────
+function sortTorrents(torrents) {
+  return [...torrents].sort((a, b) => {
+    let va = a[_sortCol], vb = b[_sortCol];
+    if (typeof va === "string") return _sortDir * va.localeCompare(vb);
+    return _sortDir * (va - vb);
+  });
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll("thead th.sortable").forEach(th => {
+    const col  = th.dataset.col;
+    const icon = th.querySelector(".sort-icon");
+    th.classList.toggle("sort-active", col === _sortCol);
+    if (col === _sortCol) {
+      icon.className = `bi sort-icon ${_sortDir === 1 ? "bi-chevron-up" : "bi-chevron-down"}`;
+    } else {
+      icon.className = "bi bi-chevron-expand sort-icon";
+    }
+  });
+}
+
+function renderRows(torrents) {
+  const tbody = document.getElementById("torrentBody");
+  const cols  = 5;
+  if (torrents.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="${cols}"><div class="empty-state"><i class="bi bi-check-circle"></i>No deletable torrents found.</div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = sortTorrents(torrents).map(t => {
+    const dt = formatDate(t.addedDate);
+    return `<tr id="row-${t.id}" data-id="${t.id}">
+      <td>
+        <div class="torrent-name">${esc(t.name)}</div>
+        <div class="torrent-path">${esc(t.downloadDir)}</div>
+      </td>
+      <td>
+        <div class="date-text">${esc(dt.line1)}</div>
+        <div class="date-sub">${esc(dt.line2)}</div>
+      </td>
+      <td>${renderTrackers(t.trackers)}</td>
+      <td><span class="size-badge">${formatBytes(t.totalSize)}</span></td>
+      <td>
+        <button class="btn-delete" title="Delete torrent and media"
+          onclick="confirmDelete(${t.id}, ${JSON.stringify(esc(t.name))}, ${t.totalSize})">
+          <i class="bi bi-trash3"></i>
+        </button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+// ── Sort click handlers ───────────────────────────────────────────────────────
+document.querySelectorAll("thead th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const col = th.dataset.col;
+    if (_sortCol === col) {
+      _sortDir *= -1;
+    } else {
+      _sortCol = col;
+      _sortDir = th.dataset.type === "str" ? 1 : -1;
+    }
+    updateSortHeaders();
+    renderRows(_allTorrents);
+  });
+});
+
+// ── Summary ───────────────────────────────────────────────────────────────────
+function updateSummary() {
+  const remaining = Object.values(_rowSizes);
+  document.getElementById("statCount").textContent = remaining.length;
+  const total = remaining.reduce((a, b) => a + b, 0);
+  document.getElementById("statSize").textContent = remaining.length ? formatBytes(total) : "—";
+}
+
+// ── Load data ─────────────────────────────────────────────────────────────────
+async function loadData() {
+  const tbody    = document.getElementById("torrentBody");
+  const errorBox = document.getElementById("errorBox");
+  const statsBar = document.getElementById("statsBar");
+  const icon     = document.getElementById("refreshIcon");
+  const btn      = document.getElementById("refreshBtn");
+
+  icon.classList.add("spin");
+  btn.disabled = true;
+  errorBox.style.display = "none";
+  statsBar.style.setProperty("display", "none", "important");
+  tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><i class="bi bi-arrow-repeat spin"></i>Loading…</div></td></tr>';
+  _rowSizes = {};
+  _allTorrents = [];
+
+  try {
+    const resp = await fetch("/api/deletable");
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    _allTorrents = data.torrents.map(t => ({
+      ...t,
+      tracker: t.trackers.length ? trackerHost(t.trackers[0]) : ""
+    }));
+    _allTorrents.forEach(t => { _rowSizes[t.id] = t.totalSize; });
+
+    updateSortHeaders();
+    renderRows(_allTorrents);
+
+    document.getElementById("statCount").textContent = data.count;
+    document.getElementById("statSize").textContent  = data.count ? formatBytes(data.totalBytes) : "—";
+    statsBar.style.removeProperty("display");
+
+  } catch (err) {
+    errorBox.textContent = "Error: " + err.message;
+    errorBox.style.display = "block";
+    tbody.innerHTML = "";
+  } finally {
+    icon.classList.remove("spin");
+    btn.disabled = false;
+  }
+}
+
+// ── Delete ────────────────────────────────────────────────────────────────────
+function confirmDelete(id, name, size) {
+  _pendingId = id;
+  document.getElementById("modalName").textContent = name;
+  document.getElementById("modalMeta").textContent = formatBytes(size);
+  document.getElementById("modalError").style.display = "none";
+  document.getElementById("confirmDeleteBtn").disabled = false;
+  document.getElementById("confirmDeleteBtn").innerHTML = '<i class="bi bi-trash3"></i> Delete permanently';
+  if (!_modal) _modal = new bootstrap.Modal(document.getElementById("deleteModal"));
+  _modal.show();
+}
+
+async function executeDelete() {
+  if (_pendingId === null) return;
+  const btn   = document.getElementById("confirmDeleteBtn");
+  const errEl = document.getElementById("modalError");
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Deleting…';
+  errEl.style.display = "none";
+
+  try {
+    const resp = await fetch(`/api/torrent/${_pendingId}/delete`, { method: "POST" });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    const row = document.getElementById(`row-${_pendingId}`);
+    if (row) { row.classList.add("deleting"); setTimeout(() => row.remove(), 380); }
+
+    delete _rowSizes[_pendingId];
+    _allTorrents = _allTorrents.filter(t => t.id !== _pendingId);
+    updateSummary();
+
+    setTimeout(() => {
+      if (Object.keys(_rowSizes).length === 0) {
+        document.getElementById("torrentBody").innerHTML =
+          '<tr><td colspan="5"><div class="empty-state"><i class="bi bi-check-circle"></i>No deletable torrents found.</div></td></tr>';
+      }
+    }, 400);
+
+    _modal.hide();
+  } catch (err) {
+    errEl.textContent = "Failed: " + err.message;
+    errEl.style.display = "block";
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-trash3"></i> Delete permanently';
+  }
+}
+
+loadData();
+</script>
+</body>
+</html>

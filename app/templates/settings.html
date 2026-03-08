@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings — Transmission Cleaner</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c6af7'/%3E%3Cstop offset='1' stop-color='%235b8dee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M7 10h18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z' fill='none' stroke='white' stroke-width='1.8'/%3E%3Ccircle cx='22' cy='16' r='1.5' fill='white'/%3E%3Ccircle cx='18' cy='16' r='1.5' fill='rgba(255,255,255,0.5)'/%3E%3Cline x1='8' y1='13' x2='13' y2='13' stroke='rgba(255,255,255,0.6)' stroke-width='1.5' stroke-linecap='round'/%3E%3Cline x1='8' y1='16' x2='13' y2='16' stroke='rgba(255,255,255,0.4)' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    :root {
+      --bg:        #0d0d18;
+      --surface:   #16162a;
+      --surface2:  #1e1e35;
+      --border:    rgba(255,255,255,0.07);
+      --accent:    #7c6af7;
+      --accent2:   #5b8dee;
+      --danger:    #e05c5c;
+      --text-muted: rgba(255,255,255,0.45);
+    }
+    * { box-sizing: border-box; }
+    body { background: var(--bg); color: #e8e8f0; font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+
+    .app-header {
+      background: linear-gradient(135deg, #1a1040 0%, #0f1a30 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 2rem;
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    }
+    .app-title { display: flex; align-items: center; gap: .75rem; font-size: 1.15rem; font-weight: 600; }
+    .app-title .icon-wrap {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center; font-size: 1rem;
+    }
+    .btn-back {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .45rem .9rem; font-size: .85rem;
+      display: flex; align-items: center; gap: .4rem; text-decoration: none;
+      transition: background .15s;
+    }
+    .btn-back:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+    .main-content { padding: 2rem; max-width: 640px; margin: 0 auto; }
+
+    .settings-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      overflow: hidden; margin-bottom: 1.25rem;
+    }
+    .settings-card-header {
+      background: var(--surface2); border-bottom: 1px solid var(--border);
+      padding: .85rem 1.25rem; font-size: .75rem; font-weight: 600;
+      letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted);
+      display: flex; align-items: center; gap: .5rem;
+    }
+    .settings-card-body { padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
+
+    .field-group { display: flex; flex-direction: column; gap: .4rem; }
+    .field-label { font-size: .8rem; font-weight: 500; color: rgba(255,255,255,.7); }
+    .field-desc  { font-size: .74rem; color: var(--text-muted); margin-top: .1rem; }
+    .field-row   { display: flex; gap: .75rem; }
+    .field-row .field-group { flex: 1; }
+
+    input[type="text"], input[type="password"], input[type="number"] {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .55rem .85rem; font-size: .88rem; width: 100%;
+      transition: border-color .15s, box-shadow .15s; outline: none;
+    }
+    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,106,247,.18); }
+    input::placeholder { color: var(--text-muted); }
+
+    .btn-test {
+      background: rgba(91,141,238,.12); border: 1px solid rgba(91,141,238,.3); color: #7aabf5;
+      border-radius: 8px; padding: .5rem 1.1rem; font-size: .85rem; font-weight: 500;
+      cursor: pointer; display: flex; align-items: center; gap: .45rem;
+      transition: background .15s; white-space: nowrap;
+    }
+    .btn-test:hover { background: rgba(91,141,238,.22); }
+    .btn-test:disabled { opacity: .5; pointer-events: none; }
+
+    .btn-save {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border: none; color: #fff; border-radius: 8px; padding: .6rem 1.5rem;
+      font-size: .9rem; font-weight: 600; cursor: pointer; width: 100%;
+      transition: opacity .15s, transform .1s;
+    }
+    .btn-save:hover { opacity: .9; transform: scale(1.01); }
+    .btn-save:disabled { opacity: .5; pointer-events: none; }
+
+    .status-msg { font-size: .83rem; padding: .6rem .9rem; border-radius: 8px; margin-top: .75rem; display: none; }
+    .status-ok  { background: rgba(80,200,120,.12); border: 1px solid rgba(80,200,120,.25); color: #6fd98e; }
+    .status-err { background: rgba(224,92,92,.12);  border: 1px solid rgba(224,92,92,.25);  color: #f0a0a0; }
+    .status-info{ background: rgba(91,141,238,.12); border: 1px solid rgba(91,141,238,.25); color: #7aabf5; }
+
+    .spin { animation: spin .7s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .conn-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: .35rem; }
+    .conn-ok  { background: #50c878; box-shadow: 0 0 6px rgba(80,200,120,.6); }
+    .conn-err { background: #e05c5c; box-shadow: 0 0 6px rgba(224,92,92,.6); }
+    .conn-idle{ background: rgba(255,255,255,.2); }
+  </style>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">
+    <div class="icon-wrap"><i class="bi bi-gear-fill text-white"></i></div>
+    Settings
+  </div>
+  <a href="/" class="btn-back"><i class="bi bi-arrow-left"></i> Back</a>
+</header>
+
+<main class="main-content">
+
+  <!-- Transmission connection -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-hdd-network"></i> Transmission Connection</div>
+    <div class="settings-card-body">
+      <div class="field-row">
+        <div class="field-group" style="flex:3">
+          <label class="field-label">Host</label>
+          <input type="text" id="host" placeholder="192.168.1.132">
+        </div>
+        <div class="field-group" style="flex:1">
+          <label class="field-label">Port</label>
+          <input type="number" id="port" placeholder="9091" min="1" max="65535">
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">RPC Path</label>
+        <input type="text" id="rpc_path" placeholder="/rpc">
+        <span class="field-desc">Default is <code style="color:var(--accent)">/rpc</code> — standard installs use <code style="color:var(--accent)">/transmission/rpc</code></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.75rem;margin-top:.25rem">
+        <button class="btn-test" id="testBtn" onclick="testConnection()">
+          <i class="bi bi-plug" id="testIcon"></i> Test connection
+        </button>
+        <span id="connStatus" style="font-size:.83rem;color:var(--text-muted);display:flex;align-items:center">
+          <span class="conn-dot conn-idle" id="connDot"></span>
+          <span id="connText">Not tested</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Authentication -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-shield-lock"></i> Authentication (optional)</div>
+    <div class="settings-card-body">
+      <div class="field-group">
+        <label class="field-label">Username</label>
+        <input type="text" id="user" placeholder="Leave empty if no auth" autocomplete="off">
+      </div>
+      <div class="field-group">
+        <label class="field-label">Password</label>
+        <input type="password" id="pass" placeholder="Leave empty if no auth" autocomplete="new-password">
+        <span class="field-desc">Password is stored in the config file. Leave unchanged to keep existing.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Save -->
+  <button class="btn-save" id="saveBtn" onclick="saveSettings()">
+    <i class="bi bi-floppy"></i> Save settings
+  </button>
+  <div class="status-msg" id="saveStatus"></div>
+
+</main>
+
+<script>
+async function loadSettings() {
+  const resp = await fetch("/api/settings");
+  const d    = await resp.json();
+  document.getElementById("host").value     = d.transmission_host     || "";
+  document.getElementById("port").value     = d.transmission_port     || "";
+  document.getElementById("rpc_path").value = d.transmission_rpc_path || "";
+  document.getElementById("user").value     = d.transmission_user     || "";
+  document.getElementById("pass").value     = d.transmission_pass     || "";
+}
+
+async function testConnection() {
+  const btn      = document.getElementById("testBtn");
+  const icon     = document.getElementById("testIcon");
+  const dot      = document.getElementById("connDot");
+  const text     = document.getElementById("connText");
+
+  btn.disabled = true;
+  icon.className = "bi bi-arrow-repeat spin";
+  dot.className  = "conn-dot conn-idle";
+  text.textContent = "Testing…";
+
+  try {
+    const resp = await fetch("/api/health");
+    const d    = await resp.json();
+    if (d.status === "ok") {
+      dot.className  = "conn-dot conn-ok";
+      text.textContent = "Connected to " + d.transmission;
+    } else {
+      throw new Error(d.error || "Unknown error");
+    }
+  } catch (err) {
+    dot.className  = "conn-dot conn-err";
+    text.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    icon.className = "bi bi-plug";
+  }
+}
+
+async function saveSettings() {
+  const btn    = document.getElementById("saveBtn");
+  const status = document.getElementById("saveStatus");
+
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Saving…';
+
+  const payload = {
+    transmission_host:     document.getElementById("host").value.trim(),
+    transmission_port:     document.getElementById("port").value.trim(),
+    transmission_rpc_path: document.getElementById("rpc_path").value.trim(),
+    transmission_user:     document.getElementById("user").value.trim(),
+    transmission_pass:     document.getElementById("pass").value,
+  };
+
+  try {
+    const resp = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const d = await resp.json();
+    if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
+
+    status.textContent = "Settings saved successfully.";
+    status.className   = "status-msg status-ok";
+    status.style.display = "block";
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+    status.className   = "status-msg status-err";
+    status.style.display = "block";
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-floppy"></i> Save settings';
+    setTimeout(() => { status.style.display = "none"; }, 4000);
+  }
+}
+
+loadSettings();
+</script>
+</body>
+</html>
