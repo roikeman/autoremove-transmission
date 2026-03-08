@@ -6,6 +6,6 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - /share:/share:ro          # 12tb-share — same path as Transmission, read-only
-      - ./config:/config          # persisted settings (config.json)
+      - /share:/share:ro
+      - ./config:/config
     restart: unless-stopped
