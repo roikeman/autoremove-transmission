@@ -128,6 +128,39 @@ def health():
         return jsonify({"status": "error", "error": str(e)}), 503
 
 
+@app.route("/api/test-connection", methods=["POST"])
+def test_connection():
+    """Test connection using form values without touching saved config."""
+    data = flask_request.get_json(force=True) or {}
+    host     = data.get("transmission_host", "").strip()
+    port     = data.get("transmission_port", "").strip()
+    rpc_path = data.get("transmission_rpc_path", "/rpc").strip()
+    user     = data.get("transmission_user", "").strip()
+    password = data.get("transmission_pass", "")
+
+    if not host or not port:
+        return jsonify({"status": "error", "error": "Host and port are required"}), 400
+
+    url  = f"http://{host}:{port}{rpc_path}"
+    auth = (user, password) if user else None
+    try:
+        # Step 1: get CSRF token
+        r = requests.post(url, json={}, auth=auth, timeout=8, allow_redirects=False)
+        sid = r.headers.get("X-Transmission-Session-Id", "")
+        # Step 2: actual call
+        r2 = requests.post(
+            url,
+            json={"method": "session-get", "arguments": {"fields": ["version"]}},
+            headers={"X-Transmission-Session-Id": sid},
+            auth=auth, timeout=8, allow_redirects=False
+        )
+        if r2.status_code == 200:
+            return jsonify({"status": "ok", "transmission": f"{host}:{port}"})
+        return jsonify({"status": "error", "error": f"Unexpected status {r2.status_code}"}), 503
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 503
+
+
 @app.route("/api/torrent/<int:torrent_id>/delete", methods=["POST"])
 def delete_torrent(torrent_id):
     try:

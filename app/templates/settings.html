@@ -192,8 +192,18 @@ async function testConnection() {
   text.textContent = "Testing…";
 
   try {
-    const resp = await fetch("/api/health");
-    const d    = await resp.json();
+    const resp = await fetch("/api/test-connection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transmission_host:     document.getElementById("host").value.trim(),
+        transmission_port:     document.getElementById("port").value.trim(),
+        transmission_rpc_path: document.getElementById("rpc_path").value.trim(),
+        transmission_user:     document.getElementById("user").value.trim(),
+        transmission_pass:     document.getElementById("pass").value,
+      }),
+    });
+    const d = await resp.json();
     if (d.status === "ok") {
       dot.className  = "conn-dot conn-ok";
       text.textContent = "Connected to " + d.transmission;
