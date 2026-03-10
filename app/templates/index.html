@@ -340,7 +340,7 @@ function renderRows(torrents) {
       <td><span class="size-badge">${formatBytes(t.totalSize)}</span></td>
       <td>
         <button class="btn-delete" title="Delete torrent and media"
-          onclick="confirmDelete(${t.id}, ${JSON.stringify(esc(t.name))}, ${t.totalSize})">
+          onclick="confirmDelete(${t.id})">
           <i class="bi bi-trash3"></i>
         </button>
       </td>
@@ -416,10 +416,11 @@ async function loadData() {
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────
-function confirmDelete(id, name, size) {
+function confirmDelete(id) {
+  const t = _allTorrents.find(t => t.id === id);
   _pendingId = id;
-  document.getElementById("modalName").textContent = name;
-  document.getElementById("modalMeta").textContent = formatBytes(size);
+  document.getElementById("modalName").textContent = t.name;
+  document.getElementById("modalMeta").textContent = formatBytes(t.totalSize);
   document.getElementById("modalError").style.display = "none";
   document.getElementById("confirmDeleteBtn").disabled = false;
   document.getElementById("confirmDeleteBtn").innerHTML = '<i class="bi bi-trash3"></i> Delete permanently';
