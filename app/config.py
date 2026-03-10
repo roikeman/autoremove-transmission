@@ -9,7 +9,7 @@ DEFAULTS = {
     "transmission_port":     "9091",
     "transmission_user":     "",
     "transmission_pass":     "",
-    "transmission_rpc_path": "/rpc",
+    "transmission_rpc_path": "/transmission/rpc",
 }
 
 _lock = threading.Lock()
