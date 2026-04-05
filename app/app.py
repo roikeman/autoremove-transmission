@@ -109,7 +109,10 @@ def save_settings():
     if data.get("transmission_pass", "").startswith("••"):
         data["transmission_pass"] = current["transmission_pass"]
 
-    saved = cfg_mod.save(data)
+    try:
+        saved = cfg_mod.save(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     # Reset RPC session so next call re-authenticates with new settings
     with _session_lock:
         _session_id = None
