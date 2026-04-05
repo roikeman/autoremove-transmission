@@ -156,6 +156,29 @@
       background: rgba(224,92,92,.12); border: 1px solid rgba(224,92,92,.3); color: #f0a0a0;
       border-radius: 10px; padding: .75rem 1.1rem; font-size: .88rem; margin-bottom: 1rem; display: none;
     }
+
+    /* Orphan section */
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: .85rem 1.25rem; cursor: pointer; user-select: none;
+      transition: background .15s;
+    }
+    .section-header:hover { background: rgba(255,255,255,.03); }
+    .section-title {
+      display: flex; align-items: center; gap: .6rem;
+      font-size: .72rem; font-weight: 600; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--text-muted);
+    }
+    .section-chevron { transition: transform .25s ease; color: var(--text-muted); }
+    .section-open .section-chevron { transform: rotate(180deg); }
+    .section-body { display: none; border-top: 1px solid var(--border); }
+    .section-open .section-body { display: block; }
+    .orphan-stats {
+      display: flex; gap: 2rem; align-items: center; flex-wrap: wrap;
+      padding: .65rem 1.25rem; font-size: .83rem;
+      background: var(--surface2); border-bottom: 1px solid var(--border);
+    }
+    .orphan-path { font-size: .74rem; color: var(--text-muted); margin-top: .15rem; word-break: break-all; }
   </style>
 </head>
 <body>
@@ -216,7 +239,85 @@
       </table>
     </div>
   </div>
+
+  <!-- Orphan files section -->
+  <div style="margin-top:1.25rem">
+    <div class="table-card" id="orphanSection">
+      <div class="section-header" onclick="toggleOrphanSection()">
+        <div class="section-title">
+          <i class="bi bi-file-earmark-x"></i>
+          Orphan Files
+          <span class="badge-pill" id="orphanBadge" style="display:none">0</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:.6rem">
+          <button class="btn-refresh" id="orphanRefreshBtn" style="font-size:.8rem;padding:.35rem .7rem"
+            onclick="event.stopPropagation();loadOrphans()" title="Scan for orphan files">
+            <i class="bi bi-arrow-clockwise" id="orphanRefreshIcon"></i>
+          </button>
+          <i class="bi bi-chevron-down section-chevron" id="orphanChevron"></i>
+        </div>
+      </div>
+      <div class="section-body" id="orphanBody">
+        <div class="orphan-stats" id="orphanStats" style="display:none">
+          <div class="stat-item">
+            <span class="stat-label">Orphan files</span>
+            <span class="badge-pill" id="orphanStatCount">0</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Reclaimable</span>
+            <span class="stat-value" id="orphanStatSize" style="color:#a89df9">—</span>
+          </div>
+        </div>
+        <div class="alert-error" id="orphanError"></div>
+        <div class="table-scroll" style="max-height:420px">
+          <table>
+            <thead>
+              <tr>
+                <th class="sortable" data-orphan-col="name" data-type="str">File <i class="bi bi-chevron-expand sort-icon"></i></th>
+                <th class="sortable" data-orphan-col="parentDir" data-type="str" style="width:240px">Directory <i class="bi bi-chevron-expand sort-icon"></i></th>
+                <th class="sortable" data-orphan-col="size" data-type="num" style="width:115px">Size <i class="bi bi-chevron-expand sort-icon"></i></th>
+                <th style="width:56px"></th>
+              </tr>
+            </thead>
+            <tbody id="orphanBody2">
+              <tr><td colspan="4"><div class="empty-state" style="padding:2rem">
+                <i class="bi bi-search" style="font-size:2rem;display:block;margin-bottom:.5rem;opacity:.3"></i>
+                Click refresh to scan for orphan files.
+              </div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
 </main>
+
+<!-- Orphan delete modal -->
+<div class="modal fade" id="orphanDeleteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-trash3-fill"></i> Delete orphan file</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p style="margin:0;font-size:.9rem;color:rgba(255,255,255,.7)">Permanently delete this file from disk?</p>
+        <div class="torrent-info-box">
+          <div class="name" id="orphanModalName"></div>
+          <div class="meta" id="orphanModalMeta"></div>
+        </div>
+        <div class="warning-text"><i class="bi bi-exclamation-triangle-fill"></i> This action cannot be undone.</div>
+        <div class="modal-error" id="orphanModalError"></div>
+      </div>
+      <div class="modal-footer" style="gap:.5rem">
+        <button class="btn-cancel" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn-confirm-delete" id="orphanConfirmBtn" onclick="executeOrphanDelete()">
+          <i class="bi bi-trash3"></i> Delete permanently
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Delete modal -->
 <div class="modal fade" id="deleteModal" tabindex="-1" aria-hidden="true">
@@ -465,6 +566,163 @@ async function executeDelete() {
 }
 
 loadData();
+
+// ── Orphan Files ──────────────────────────────────────────────────────────────
+// All dynamic values rendered via innerHTML are sanitized with esc() which
+// escapes &, <, > before insertion — safe against XSS.
+let _allOrphans    = [];
+let _orphanSortCol = "size";
+let _orphanSortDir = -1;
+let _pendingOrphan = null;
+let _orphanModal   = null;
+let _orphanOpen    = false;
+
+function toggleOrphanSection() {
+  _orphanOpen = !_orphanOpen;
+  document.getElementById("orphanSection").classList.toggle("section-open", _orphanOpen);
+}
+
+function sortOrphans(list) {
+  return [...list].sort((a, b) => {
+    const va = a[_orphanSortCol], vb = b[_orphanSortCol];
+    return typeof va === "string" ? _orphanSortDir * va.localeCompare(vb) : _orphanSortDir * (va - vb);
+  });
+}
+
+function updateOrphanSortHeaders() {
+  document.querySelectorAll("th[data-orphan-col]").forEach(th => {
+    const col  = th.dataset.orphanCol;
+    const icon = th.querySelector(".sort-icon");
+    th.classList.toggle("sort-active", col === _orphanSortCol);
+    icon.className = col === _orphanSortCol
+      ? `bi sort-icon ${_orphanSortDir === 1 ? "bi-chevron-up" : "bi-chevron-down"}`
+      : "bi bi-chevron-expand sort-icon";
+  });
+}
+
+function renderOrphanRows(list) {
+  const tbody = document.getElementById("orphanBody2");
+  if (!list.length) {
+    tbody.textContent = "";
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 4;
+    td.innerHTML = `<div class="empty-state" style="padding:2rem"><i class="bi bi-check-circle"></i>No orphan files found.</div>`;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  // All values passed through esc() before use in template
+  tbody.innerHTML = sortOrphans(list).map((f, i) => `
+    <tr id="orphan-${i}">
+      <td>
+        <div class="torrent-name">${esc(f.name)}</div>
+        <div class="orphan-path">${esc(f.path)}</div>
+      </td>
+      <td><div class="date-text" style="font-size:.82rem">${esc(f.parentDir)}</div></td>
+      <td><span class="size-badge">${formatBytes(f.size)}</span></td>
+      <td>
+        <button class="btn-delete" title="Delete file" onclick="confirmOrphanDelete(${i})">
+          <i class="bi bi-trash3"></i>
+        </button>
+      </td>
+    </tr>`).join("");
+}
+
+document.querySelectorAll("th[data-orphan-col]").forEach(th => {
+  th.addEventListener("click", () => {
+    const col = th.dataset.orphanCol;
+    if (_orphanSortCol === col) _orphanSortDir *= -1;
+    else { _orphanSortCol = col; _orphanSortDir = th.dataset.type === "str" ? 1 : -1; }
+    updateOrphanSortHeaders();
+    renderOrphanRows(_allOrphans);
+  });
+});
+
+async function loadOrphans() {
+  if (!_orphanOpen) toggleOrphanSection();
+  const tbody  = document.getElementById("orphanBody2");
+  const errBox = document.getElementById("orphanError");
+  const stats  = document.getElementById("orphanStats");
+  const badge  = document.getElementById("orphanBadge");
+  const icon   = document.getElementById("orphanRefreshIcon");
+  const btn    = document.getElementById("orphanRefreshBtn");
+
+  icon.classList.add("spin"); btn.disabled = true;
+  errBox.style.display = "none"; stats.style.display = "none";
+  badge.style.display = "none"; _allOrphans = [];
+  tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state" style="padding:2rem">
+    <i class="bi bi-arrow-repeat spin"></i>Scanning\u2026</div></td></tr>`;
+
+  try {
+    const resp = await fetch("/api/orphans");
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    _allOrphans = data.orphans;
+    updateOrphanSortHeaders();
+    renderOrphanRows(_allOrphans);
+
+    document.getElementById("orphanStatCount").textContent = data.count;
+    document.getElementById("orphanStatSize").textContent  = data.count ? formatBytes(data.totalBytes) : "\u2014";
+    stats.style.display = "flex";
+    if (data.count) { badge.textContent = data.count; badge.style.display = ""; }
+  } catch (err) {
+    errBox.textContent = "Error: " + err.message;
+    errBox.style.display = "block";
+    tbody.textContent = "";
+  } finally {
+    icon.classList.remove("spin"); btn.disabled = false;
+  }
+}
+
+function confirmOrphanDelete(idx) {
+  _pendingOrphan = sortOrphans(_allOrphans)[idx];
+  document.getElementById("orphanModalName").textContent = _pendingOrphan.name;
+  document.getElementById("orphanModalMeta").textContent = _pendingOrphan.path + "  \u00b7  " + formatBytes(_pendingOrphan.size);
+  document.getElementById("orphanModalError").style.display = "none";
+  const btn = document.getElementById("orphanConfirmBtn");
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-trash3"></i> Delete permanently';
+  if (!_orphanModal) _orphanModal = new bootstrap.Modal(document.getElementById("orphanDeleteModal"));
+  _orphanModal.show();
+}
+
+async function executeOrphanDelete() {
+  if (!_pendingOrphan) return;
+  const btn   = document.getElementById("orphanConfirmBtn");
+  const errEl = document.getElementById("orphanModalError");
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Deleting\u2026';
+  errEl.style.display = "none";
+
+  try {
+    const resp = await fetch("/api/orphan/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: _pendingOrphan.path }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    _allOrphans = _allOrphans.filter(f => f.path !== _pendingOrphan.path);
+    renderOrphanRows(_allOrphans);
+
+    const total = _allOrphans.reduce((a, f) => a + f.size, 0);
+    document.getElementById("orphanStatCount").textContent = _allOrphans.length;
+    document.getElementById("orphanStatSize").textContent  = _allOrphans.length ? formatBytes(total) : "\u2014";
+    const badge = document.getElementById("orphanBadge");
+    if (_allOrphans.length) badge.textContent = _allOrphans.length;
+    else badge.style.display = "none";
+
+    _orphanModal.hide();
+  } catch (err) {
+    errEl.textContent = "Failed: " + err.message;
+    errEl.style.display = "block";
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-trash3"></i> Delete permanently';
+  }
+}
 </script>
 </body>
 </html>

@@ -5,6 +5,6 @@ services:
     build: .
     network_mode: host
     volumes:
-      - /share:/share:ro
+      - /share:/share:rw
       - ./config:/config
     restart: unless-stopped

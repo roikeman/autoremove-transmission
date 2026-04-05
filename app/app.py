@@ -173,6 +173,95 @@ def delete_torrent(torrent_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _get_known_download_dirs():
+    try:
+        torrents = get_all_torrents()
+        return {t.get("downloadDir", "") for t in torrents if t.get("downloadDir")}
+    except Exception:
+        return set()
+
+
+def get_orphan_files():
+    torrents = get_all_torrents()
+
+    torrent_files = set()
+    download_dirs = set()
+    for t in torrents:
+        dl_dir = t.get("downloadDir", "")
+        if dl_dir:
+            download_dirs.add(dl_dir)
+        for f in t.get("files", []):
+            torrent_files.add(os.path.normpath(os.path.join(dl_dir, f["name"])))
+
+    _HIDDEN = {".recycle", "@eaDir", "#recycle", "@Recycle"}
+    orphans = []
+    for scan_dir in download_dirs:
+        if not os.path.isdir(scan_dir):
+            continue
+        for dirpath, dirnames, filenames in os.walk(scan_dir, followlinks=False):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in _HIDDEN]
+            for filename in filenames:
+                full_path = os.path.join(dirpath, filename)
+                if os.path.islink(full_path):
+                    continue
+                if os.path.normpath(full_path) not in torrent_files:
+                    try:
+                        size = os.path.getsize(full_path)
+                    except OSError:
+                        size = 0
+                    orphans.append({
+                        "name":      filename,
+                        "path":      full_path,
+                        "parentDir": dirpath,
+                        "size":      size,
+                    })
+
+    orphans.sort(key=lambda f: f["size"], reverse=True)
+    return orphans, sum(f["size"] for f in orphans)
+
+
+@app.route("/api/orphans")
+def api_orphans():
+    try:
+        orphans, total_bytes = get_orphan_files()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"orphans": orphans, "totalBytes": total_bytes, "count": len(orphans)})
+
+
+@app.route("/api/orphan/delete", methods=["POST"])
+def delete_orphan():
+    data = flask_request.get_json(force=True) or {}
+    path = data.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    norm = os.path.normpath(path)
+    if not os.path.isabs(norm):
+        return jsonify({"error": "Path must be absolute"}), 400
+
+    known_dirs = _get_known_download_dirs()
+    if not any(norm.startswith(os.path.normpath(d) + os.sep) for d in known_dirs):
+        return jsonify({"error": "Path is outside known download directories"}), 403
+
+    if not os.path.isfile(norm) or os.path.islink(norm):
+        return jsonify({"error": "Target is not a regular file"}), 400
+
+    try:
+        os.remove(norm)
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+
+    parent = os.path.dirname(norm)
+    try:
+        if os.path.isdir(parent) and not os.listdir(parent):
+            os.rmdir(parent)
+    except OSError:
+        pass
+
+    return jsonify({"status": "ok", "path": norm})
+
+
 @app.route("/api/deletable")
 def api_deletable():
     try:
