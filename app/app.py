@@ -92,8 +92,7 @@ def settings_page():
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     cfg = _cfg()
-    # Never expose password in GET
-    safe = {k: v for k, v in cfg.items()}
+    safe = dict(cfg)
     safe["transmission_pass"] = "••••••••" if cfg["transmission_pass"] else ""
     return jsonify(safe)
 
@@ -193,16 +192,24 @@ def get_orphan_files():
         for f in t.get("files", []):
             torrent_files.add(os.path.normpath(os.path.join(dl_dir, f["name"])))
 
+    exclude_paths = [os.path.normpath(p) for p in _cfg().get("exclude_paths", [])]
+
+    def _is_excluded(path):
+        np = os.path.normpath(path)
+        return any(np == ep or np.startswith(ep + os.sep) for ep in exclude_paths)
+
     _HIDDEN = {".recycle", "@eaDir", "#recycle", "@Recycle"}
     orphans = []
     for scan_dir in download_dirs:
-        if not os.path.isdir(scan_dir):
+        if not os.path.isdir(scan_dir) or _is_excluded(scan_dir):
             continue
         for dirpath, dirnames, filenames in os.walk(scan_dir, followlinks=False):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in _HIDDEN]
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d not in _HIDDEN
+                           and not _is_excluded(os.path.join(dirpath, d))]
             for filename in filenames:
                 full_path = os.path.join(dirpath, filename)
-                if os.path.islink(full_path):
+                if os.path.islink(full_path) or _is_excluded(full_path):
                     continue
                 if os.path.normpath(full_path) not in torrent_files:
                     try:

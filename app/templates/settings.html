@@ -161,6 +161,21 @@
     </div>
   </div>
 
+  <!-- Exclude paths -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-folder-x"></i> Exclude Paths (orphan scan)</div>
+    <div class="settings-card-body">
+      <div class="field-group">
+        <label class="field-label">Paths to exclude</label>
+        <textarea id="exclude_paths" rows="4" placeholder="/share/downloads/incomplete&#10;/share/downloads/watch"
+          style="background:var(--surface2);border:1px solid var(--border);color:#e8e8f0;border-radius:8px;padding:.55rem .85rem;font-size:.83rem;width:100%;resize:vertical;outline:none;font-family:monospace;transition:border-color .15s,box-shadow .15s"
+          onfocus="this.style.borderColor='var(--accent)';this.style.boxShadow='0 0 0 3px rgba(124,106,247,.18)'"
+          onblur="this.style.borderColor='';this.style.boxShadow=''"></textarea>
+        <span class="field-desc">One path per line. These directories and their contents will be skipped during the orphan file scan.</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Save -->
   <button class="btn-save" id="saveBtn" onclick="saveSettings()">
     <i class="bi bi-floppy"></i> Save settings
@@ -176,8 +191,9 @@ async function loadSettings() {
   document.getElementById("host").value     = d.transmission_host     || "";
   document.getElementById("port").value     = d.transmission_port     || "";
   document.getElementById("rpc_path").value = d.transmission_rpc_path || "";
-  document.getElementById("user").value     = d.transmission_user     || "";
-  document.getElementById("pass").value     = d.transmission_pass     || "";
+  document.getElementById("user").value          = d.transmission_user     || "";
+  document.getElementById("pass").value          = d.transmission_pass     || "";
+  document.getElementById("exclude_paths").value = (d.exclude_paths || []).join("\n");
 }
 
 async function testConnection() {
@@ -232,6 +248,8 @@ async function saveSettings() {
     transmission_rpc_path: document.getElementById("rpc_path").value.trim(),
     transmission_user:     document.getElementById("user").value.trim(),
     transmission_pass:     document.getElementById("pass").value,
+    exclude_paths:         document.getElementById("exclude_paths").value
+                             .split("\n").map(p => p.trim()).filter(p => p),
   };
 
   try {

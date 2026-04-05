@@ -10,6 +10,7 @@ DEFAULTS = {
     "transmission_user":     "",
     "transmission_pass":     "",
     "transmission_rpc_path": "/transmission/rpc",
+    "exclude_paths":         [],
 }
 
 _lock = threading.Lock()
@@ -27,7 +28,14 @@ def load():
 def save(data):
     with _lock:
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        merged = {**DEFAULTS, **{k: v for k, v in data.items() if k in DEFAULTS}}
+        incoming = {k: v for k, v in data.items() if k in DEFAULTS}
+        # Ensure exclude_paths is always a list of non-empty stripped strings
+        if "exclude_paths" in incoming:
+            raw = incoming["exclude_paths"]
+            if isinstance(raw, str):
+                raw = [p for p in raw.splitlines() if p.strip()]
+            incoming["exclude_paths"] = [p.strip() for p in raw if str(p).strip()]
+        merged = {**DEFAULTS, **incoming}
         with open(CONFIG_PATH, "w") as f:
             json.dump(merged, f, indent=2)
         return merged
