@@ -13,8 +13,20 @@ from clients.transmission import (
     _rpc_url,
     _auth,
 )
+from clients.jellyfin import JellyfinClient
+from clients.arr import ArrClient
+from clients import transmission as tx
+from cleanup import buckets, candidates as cand, journal, pipeline
 
 app = Flask(__name__)
+# Masked secrets use literal bullet characters (config.MASK); without this,
+# Flask's default jsonify escapes them to • sequences in the response
+# body. Functionally equivalent once parsed, but callers and tests that
+# check the raw text should see the same characters config.py produces.
+app.json.ensure_ascii = False
+
+_run_lock = threading.Lock()
+_last_plan = {"ids": set()}
 
 
 @app.route("/")
@@ -236,6 +248,192 @@ def api_deletable():
         "totalBytes": total_bytes,
         "count":      len(deletable),
     })
+
+
+def _require(cfg, *keys):
+    missing = [k for k in keys if not cfg.get(k)]
+    if missing:
+        raise RuntimeError(f"not configured: {', '.join(missing)}")
+
+
+def _build_clients(cfg):
+    return pipeline.Clients(
+        sonarr=ArrClient(cfg["sonarr_url"], cfg["sonarr_api_key"], "sonarr")
+        if cfg.get("sonarr_url") else None,
+        radarr=ArrClient(cfg["radarr_url"], cfg["radarr_api_key"], "radarr")
+        if cfg.get("radarr_url") else None,
+        jellyfin=JellyfinClient(cfg["jellyfin_url"], cfg["jellyfin_api_key"]),
+        transmission=tx,
+    )
+
+
+def _scan(cfg):
+    """Build the full candidate list. Merges user data across all Jellyfin users."""
+    from datetime import datetime
+
+    jf = JellyfinClient(cfg["jellyfin_url"], cfg["jellyfin_api_key"])
+
+    sonarr_items = []
+    radarr_items = []
+    if cfg.get("sonarr_url"):
+        sonarr_items = ArrClient(cfg["sonarr_url"], cfg["sonarr_api_key"], "sonarr").list_items()
+    if cfg.get("radarr_url"):
+        radarr_items = ArrClient(cfg["radarr_url"], cfg["radarr_api_key"], "radarr").list_items()
+    owner_index = cand.build_owner_index(sonarr_items, radarr_items)
+
+    merged = {}
+    for user in jf.users():
+        uid = user["Id"]
+        for item in jf.items(uid, "Series"):
+            _merge(merged, cand.from_series(item, owner_index))
+        for item in jf.items(uid, "Movie"):
+            _merge(merged, cand.from_movie(item, owner_index))
+
+    now = datetime.now()
+    age = int(cfg["age_days"])
+    idle = int(cfg["idle_days"])
+    return [c for c in merged.values()
+            if cand.is_stale(c.added, c.last_played, now, age, idle)]
+
+
+def _merge(store, candidate):
+    """Keep the most-watched, most-recently-played view across users."""
+    existing = store.get(candidate.jf_id)
+    if existing is None:
+        store[candidate.jf_id] = candidate
+        return
+
+    if candidate.watched > existing.watched:
+        existing.watched = candidate.watched
+    if candidate.last_played and (
+            existing.last_played is None or candidate.last_played > existing.last_played):
+        existing.last_played = candidate.last_played
+    existing.progress_pct = max(existing.progress_pct, candidate.progress_pct)
+    existing.bucket = buckets.classify(
+        existing.kind, existing.episodes, existing.watched,
+        existing.last_played, existing.progress_pct)
+    existing.flags = buckets.quality_flags(existing.added, existing.last_played, False)
+
+
+@app.route("/library")
+def library_page():
+    return render_template("library.html")
+
+
+@app.route("/api/library/candidates")
+def api_candidates():
+    cfg = cfg_mod.load()
+    try:
+        _require(cfg, "jellyfin_url", "jellyfin_api_key")
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+
+    for key in ("age_days", "idle_days"):
+        override = flask_request.args.get(key)
+        if override:
+            cfg[key] = int(override)
+
+    try:
+        found = _scan(cfg)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    found.sort(key=lambda c: c.size_bytes, reverse=True)
+    return jsonify({
+        "candidates": [c.to_dict() for c in found],
+        "preticked": sorted(buckets.PRETICKED),
+        "labels": buckets.LABELS,
+        "age_days": cfg["age_days"],
+        "idle_days": cfg["idle_days"],
+    })
+
+
+def _selected(cfg, jf_ids):
+    wanted = set(jf_ids)
+    return [c for c in _scan(cfg) if c.jf_id in wanted]
+
+
+@app.route("/api/library/plan", methods=["POST"])
+def api_plan():
+    cfg = cfg_mod.load()
+    body = flask_request.get_json(force=True) or {}
+    jf_ids = body.get("jf_ids") or []
+    if not jf_ids:
+        return jsonify({"error": "no titles selected"}), 400
+
+    try:
+        selection = _selected(cfg, jf_ids)
+        result = pipeline.plan(selection, cfg)
+    except pipeline.BlastRadiusExceeded as e:
+        return jsonify({"error": str(e), "blast_radius": True}), 409
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    _last_plan["ids"] = {c.jf_id for c in selection}
+    return jsonify(result)
+
+
+@app.route("/api/library/execute", methods=["POST"])
+def api_execute():
+    cfg = cfg_mod.load()
+    body = flask_request.get_json(force=True) or {}
+    jf_ids = body.get("jf_ids") or []
+    if not jf_ids:
+        return jsonify({"error": "no titles selected"}), 400
+
+    # Refuse a selection that doesn't match the last /plan response: the
+    # library may have changed since a stale browser tab last preflighted.
+    if set(jf_ids) != _last_plan["ids"]:
+        return jsonify({"error": "selection changed since preflight; re-run the plan"}), 409
+
+    if not _run_lock.acquire(blocking=False):
+        return jsonify({"error": "a cleanup run is already in progress"}), 409
+
+    try:
+        selection = _selected(cfg, jf_ids)
+        # Note: execute() re-checks the blast-radius caps itself, so a second
+        # pipeline.plan() call here would be redundant -- omitted.
+        results = pipeline.execute(selection, cfg, _build_clients(cfg))
+    except pipeline.BlastRadiusExceeded as e:
+        return jsonify({"error": str(e), "blast_radius": True}), 409
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+    finally:
+        _run_lock.release()
+
+    _last_plan["ids"] = set()
+    return jsonify({"results": results})
+
+
+@app.route("/api/library/journal")
+def api_journal():
+    return jsonify(journal.read_recent(limit=200))
+
+
+@app.route("/api/test-connection/<service>", methods=["POST"])
+def test_service_connection(service):
+    data = flask_request.get_json(force=True) or {}
+    cfg = cfg_mod.load()
+
+    if service not in ("jellyfin", "sonarr", "radarr"):
+        return jsonify({"error": "unknown service"}), 400
+
+    url = (data.get("url") or "").strip()
+    key = (data.get("api_key") or "").strip()
+
+    if key.startswith("••") or not key:
+        key = cfg.get(f"{service}_api_key", "")
+    if not url:
+        url = cfg.get(f"{service}_url", "")
+
+    try:
+        if service == "jellyfin":
+            count = len(JellyfinClient(url, key).users())
+            return jsonify({"status": "ok", "detail": f"{count} users"})
+        count = len(ArrClient(url, key, service).list_items())
+        return jsonify({"status": "ok", "detail": f"{count} items"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 502
 
 
 if __name__ == "__main__":
