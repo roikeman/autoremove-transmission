@@ -1,5 +1,5 @@
 import os
-from app import is_deletable
+from clients.transmission import is_deletable
 
 
 def _torrent(paths):

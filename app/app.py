@@ -4,78 +4,15 @@ import requests
 from flask import Flask, jsonify, render_template, request as flask_request
 import config as cfg_mod
 import version
-
-_session    = requests.Session()
-_session_id = None
-_session_lock = threading.Lock()
-
-
-def _cfg():
-    return cfg_mod.load()
-
-
-def _auth(cfg):
-    return (cfg["transmission_user"], cfg["transmission_pass"]) if cfg["transmission_user"] else None
-
-
-def _rpc_url(cfg):
-    return f"http://{cfg['transmission_host']}:{cfg['transmission_port']}{cfg['transmission_rpc_path']}"
-
-
-def _refresh_session_id(cfg):
-    global _session_id
-    resp = _session.post(_rpc_url(cfg), json={}, auth=_auth(cfg), timeout=10)
-    if resp.status_code == 409:
-        _session_id = resp.headers.get("X-Transmission-Session-Id", "")
-
-
-def rpc_call(method, arguments):
-    global _session_id
-    cfg = _cfg()
-
-    with _session_lock:
-        if not _session_id:
-            _refresh_session_id(cfg)
-
-    headers = {"X-Transmission-Session-Id": _session_id or ""}
-    payload = {"method": method, "arguments": arguments}
-    resp = _session.post(_rpc_url(cfg), json=payload, headers=headers, auth=_auth(cfg), timeout=30)
-
-    if resp.status_code == 409:
-        with _session_lock:
-            _refresh_session_id(cfg)
-        headers["X-Transmission-Session-Id"] = _session_id or ""
-        resp = _session.post(_rpc_url(cfg), json=payload, headers=headers, auth=_auth(cfg), timeout=30)
-
-    resp.raise_for_status()
-    return resp.json()
-
-
-def get_all_torrents():
-    result = rpc_call("torrent-get", {
-        "fields": ["id", "name", "totalSize", "downloadDir", "files", "addedDate", "trackers"]
-    })
-    return result["arguments"]["torrents"]
-
-
-def is_deletable(torrent):
-    """Return True if none of the torrent's files have hardlinks (nlink == 1)."""
-    files = torrent.get("files", [])
-    download_dir = torrent.get("downloadDir", "")
-
-    if not files:
-        return False
-
-    for file_entry in files:
-        path = os.path.join(download_dir, file_entry["name"])
-        try:
-            if os.stat(path).st_nlink > 1:
-                return False
-        except (FileNotFoundError, PermissionError, OSError):
-            continue
-
-    return True
-
+from clients.transmission import (
+    rpc_call,
+    get_all_torrents,
+    is_deletable,
+    reset_session,
+    _cfg,
+    _rpc_url,
+    _auth,
+)
 
 app = Flask(__name__)
 
@@ -100,7 +37,6 @@ def get_settings():
 
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
-    global _session_id
     data = flask_request.get_json(force=True)
     if data is None:
         return jsonify({"error": "Invalid JSON"}), 400
@@ -115,8 +51,7 @@ def save_settings():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     # Reset RPC session so next call re-authenticates with new settings
-    with _session_lock:
-        _session_id = None
+    reset_session()
 
     return jsonify({"status": "ok", "settings": {k: v for k, v in saved.items() if k != "transmission_pass"}})
 
