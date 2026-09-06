@@ -241,3 +241,183 @@ def test_corrupt_plan_file_fails_closed(client, monkeypatch):
 
     resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
     assert resp.status_code == 409
+
+
+# --- Scan cache (fix/scan-cache) --------------------------------------------
+#
+# A 91-user Jellyfin makes _scan() take ~5 minutes (one HTTP round-trip per
+# user per item type). These tests use a counting fake JellyfinClient so an
+# unexpected re-scan is caught directly, not inferred from timing.
+
+class _CountingJellyfin:
+    """Fake JellyfinClient that counts every items() call, so tests can
+    assert a request served from cache never touches it again."""
+    calls = 0
+
+    def __init__(self, base_url, api_key):
+        pass
+
+    def users(self):
+        return [{"Id": "u1"}]
+
+    def items(self, user_id, item_type):
+        _CountingJellyfin.calls += 1
+        if item_type != "Movie":
+            return []
+        return [{
+            "Id": "m1",
+            "Name": "Old Movie",
+            "Path": "/x/old-movie.mkv",
+            "DateCreated": "2015-01-01T00:00:00.0000000Z",
+            "MediaSources": [{"Size": 12345}],
+            "UserData": {
+                "Played": True,
+                "LastPlayedDate": "2015-06-01T00:00:00.0000000Z",
+            },
+        }]
+
+
+def _setup_counting_jellyfin(client, monkeypatch):
+    import config
+    import app as app_module
+
+    config.save({"jellyfin_url": "https://jf", "jellyfin_api_key": "secret-key"})
+    _CountingJellyfin.calls = 0
+    monkeypatch.setattr(app_module, "JellyfinClient", _CountingJellyfin)
+    return app_module
+
+
+def test_candidates_served_from_cache_without_rescanning(client, monkeypatch):
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+
+    first = client.get("/api/library/candidates")
+    assert first.status_code == 200
+    first_body = first.get_json()
+    assert first_body["cached"] is False
+    assert first_body["scanned_at"]
+    calls_after_first = _CountingJellyfin.calls
+    assert calls_after_first > 0
+
+    second = client.get("/api/library/candidates")
+    assert second.status_code == 200
+    second_body = second.get_json()
+    assert second_body["cached"] is True
+    assert second_body["scanned_at"] == first_body["scanned_at"]
+    assert second_body["candidates"] == first_body["candidates"]
+    # The Jellyfin client was not called again -- served entirely from cache.
+    assert _CountingJellyfin.calls == calls_after_first
+
+
+def test_candidates_refresh_param_forces_rescan(client, monkeypatch):
+    _setup_counting_jellyfin(client, monkeypatch)
+
+    client.get("/api/library/candidates")
+    calls_after_first = _CountingJellyfin.calls
+
+    resp = client.get("/api/library/candidates?refresh=1")
+    assert resp.status_code == 200
+    assert resp.get_json()["cached"] is False
+    assert _CountingJellyfin.calls > calls_after_first
+
+
+def test_candidates_changed_age_days_invalidates_cache(client, monkeypatch):
+    _setup_counting_jellyfin(client, monkeypatch)
+
+    client.get("/api/library/candidates")
+    calls_after_first = _CountingJellyfin.calls
+
+    resp = client.get("/api/library/candidates?age_days=30")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["cached"] is False
+    assert body["age_days"] == 30
+    assert _CountingJellyfin.calls > calls_after_first
+
+
+def test_candidates_changed_idle_days_invalidates_cache(client, monkeypatch):
+    _setup_counting_jellyfin(client, monkeypatch)
+
+    client.get("/api/library/candidates")
+    calls_after_first = _CountingJellyfin.calls
+
+    resp = client.get("/api/library/candidates?idle_days=5")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["cached"] is False
+    assert body["idle_days"] == 5
+    assert _CountingJellyfin.calls > calls_after_first
+
+
+def test_candidates_missing_cache_file_falls_back_to_scan(client, monkeypatch):
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+
+    assert not os.path.exists(app_module._candidates_cache_path())
+    resp = client.get("/api/library/candidates")
+    assert resp.status_code == 200
+    assert resp.get_json()["cached"] is False
+
+
+def test_candidates_corrupt_cache_file_falls_back_to_scan(client, monkeypatch):
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+
+    os.makedirs(os.path.dirname(app_module._candidates_cache_path()), exist_ok=True)
+    with open(app_module._candidates_cache_path(), "w") as f:
+        f.write("{not valid json")
+
+    resp = client.get("/api/library/candidates")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["cached"] is False
+    assert _CountingJellyfin.calls > 0
+
+
+def test_candidates_response_shape_unchanged_plus_cache_fields(client, monkeypatch):
+    _setup_counting_jellyfin(client, monkeypatch)
+
+    resp = client.get("/api/library/candidates")
+    body = resp.get_json()
+    for key in ("candidates", "preticked", "labels", "age_days", "idle_days",
+                "cached", "scanned_at"):
+        assert key in body
+
+
+def test_plan_and_execute_reuse_cache_without_rescanning(client, monkeypatch):
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+    monkeypatch.setattr(
+        app_module.pipeline, "execute",
+        lambda selection, cfg, clients: [{"jf_id": "m1", "title": "Old Movie", "status": "deleted"}])
+
+    warm = client.get("/api/library/candidates")
+    assert warm.status_code == 200
+    calls_after_scan = _CountingJellyfin.calls
+    assert calls_after_scan > 0
+
+    plan_resp = client.post("/api/library/plan", json={"jf_ids": ["m1"]})
+    assert plan_resp.status_code == 200
+    assert _CountingJellyfin.calls == calls_after_scan  # plan reused the cache
+
+    exec_resp = client.post("/api/library/execute", json={"jf_ids": ["m1"]})
+    assert exec_resp.status_code == 200
+    assert _CountingJellyfin.calls == calls_after_scan  # execute reused the cache too
+
+
+def test_cache_cleared_after_successful_execute(client, monkeypatch):
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+    monkeypatch.setattr(
+        app_module.pipeline, "execute",
+        lambda selection, cfg, clients: [{"jf_id": "m1", "title": "Old Movie", "status": "deleted"}])
+
+    client.get("/api/library/candidates")
+    assert os.path.exists(app_module._candidates_cache_path())
+
+    client.post("/api/library/plan", json={"jf_ids": ["m1"]})
+    exec_resp = client.post("/api/library/execute", json={"jf_ids": ["m1"]})
+    assert exec_resp.status_code == 200
+
+    assert not os.path.exists(app_module._candidates_cache_path())
+
+    # A subsequent candidates fetch must re-scan, not resurrect stale data.
+    calls_before = _CountingJellyfin.calls
+    resp = client.get("/api/library/candidates")
+    assert resp.get_json()["cached"] is False
+    assert _CountingJellyfin.calls > calls_before

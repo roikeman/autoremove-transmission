@@ -255,9 +255,10 @@
     <label for="idleDays">Idle (days)</label>
     <input type="number" id="idleDays" min="0" placeholder="90">
   </div>
-  <button class="btn-refresh" id="rescanBtn" onclick="loadCandidates()">
+  <button class="btn-refresh" id="rescanBtn" onclick="loadCandidates(true)">
     <i class="bi bi-arrow-clockwise" id="rescanIcon"></i> Rescan
   </button>
+  <span class="stat-label" id="lastScannedLabel" style="align-self:center"></span>
   <button class="btn-refresh" id="journalToggleBtn" onclick="toggleJournal()" style="margin-left:auto">
     <i class="bi bi-journal-text"></i> Journal
   </button>
@@ -340,6 +341,27 @@ let _modal          = null;
 let _journalOpen     = false;
 let _journalLoaded    = false;
 
+// A slow backend call (e.g. a multi-minute Jellyfin library scan across
+// many users) can be killed by a browser or reverse-proxy timeout before
+// it produces a JSON body -- the caller then gets an HTML/plain-text
+// gateway error page instead, and a bare `resp.json()` throws an opaque
+// "unexpected non-whitespace character" SyntaxError that tells the owner
+// nothing. Read the body as text first and parse it defensively so a
+// non-JSON response surfaces the HTTP status and a short body preview
+// instead. A well-formed JSON error body still comes back untouched, so
+// callers keep showing the server's own `error` string verbatim.
+async function parseJsonResponse(resp) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
+    throw new Error(
+      `HTTP ${resp.status} — server returned a non-JSON response: "${preview}"`
+    );
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function formatBytes(bytes) {
   const u = ["B", "KB", "MB", "GB", "TB"];
@@ -393,10 +415,13 @@ function statItem(label, value, valueClassName) {
 }
 
 // ── Load candidates ──────────────────────────────────────────────────────────
-async function loadCandidates() {
+// forceRefresh: true for the explicit "Rescan" control, which must always
+// hit Jellyfin again rather than silently reusing a possibly-stale cache.
+async function loadCandidates(forceRefresh) {
   const errorBox = document.getElementById("errorBox");
   const icon     = document.getElementById("rescanIcon");
   const btn      = document.getElementById("rescanBtn");
+  const scanInfo = document.getElementById("lastScannedLabel");
 
   icon.classList.add("spin");
   btn.disabled = true;
@@ -407,10 +432,11 @@ async function loadCandidates() {
   const params = new URLSearchParams();
   if (age)  params.set("age_days", age);
   if (idle) params.set("idle_days", idle);
+  if (forceRefresh) params.set("refresh", "1");
 
   try {
     const resp = await fetch("/api/library/candidates?" + params.toString());
-    const data = await resp.json();
+    const data = await parseJsonResponse(resp);
     if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
 
     _candidates = data.candidates || [];
@@ -418,6 +444,18 @@ async function loadCandidates() {
     _labels     = data.labels || {};
     document.getElementById("ageDays").value  = data.age_days;
     document.getElementById("idleDays").value = data.idle_days;
+
+    if (scanInfo) {
+      if (data.cached && data.scanned_at) {
+        const scannedDate = new Date(data.scanned_at);
+        const scannedText = isNaN(scannedDate.getTime())
+          ? data.scanned_at
+          : scannedDate.toLocaleString();
+        scanInfo.textContent = "Last scanned: " + scannedText;
+      } else {
+        scanInfo.textContent = "";
+      }
+    }
 
     _checked = new Set(
       _candidates.filter(c => _preticked.includes(c.bucket)).map(c => c.jf_id)
@@ -654,7 +692,7 @@ async function runPreflight() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jf_ids: [...requestedIds] }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse(resp);
 
     if (resp.ok) {
       _lastPlanIds = requestedIds;
@@ -726,7 +764,7 @@ async function executeDelete() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jf_ids: [..._lastPlanIds] }),
     });
-    const data = await resp.json();
+    const data = await parseJsonResponse(resp);
 
     if (resp.ok) {
       renderResults(data.results || []);
@@ -821,7 +859,7 @@ async function loadJournal() {
   body.textContent = "Loading…";
   try {
     const resp = await fetch("/api/library/journal");
-    const data = await resp.json();
+    const data = await parseJsonResponse(resp);
     if (!resp.ok) throw new Error((data && data.error) || `HTTP ${resp.status}`);
 
     body.textContent = "";
