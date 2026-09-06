@@ -57,6 +57,15 @@
       outline: none; transition: border-color .15s, box-shadow .15s;
     }
     .control-group input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,106,247,.18); }
+    .control-group select {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .45rem .7rem; font-size: .85rem;
+      outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    .control-group select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,106,247,.18); }
+
+    .select-all-wrap { display: flex; align-items: center; gap: .35rem; }
+    .select-all-wrap label { font-size: .78rem; color: var(--text-muted); cursor: pointer; user-select: none; }
 
     .btn-refresh {
       background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
@@ -255,6 +264,19 @@
     <label for="idleDays">Idle (days)</label>
     <input type="number" id="idleDays" min="0" placeholder="90">
   </div>
+  <div class="control-group">
+    <label for="sortKey">Sort by</label>
+    <select id="sortKey" onchange="onSortChange()">
+      <option value="size">Size</option>
+      <option value="title">Title</option>
+      <option value="added">Added</option>
+      <option value="last_played">Last played</option>
+      <option value="progress">Progress</option>
+    </select>
+  </div>
+  <button class="btn-refresh" id="sortDirBtn" onclick="toggleSortDir()" title="Toggle ascending/descending">
+    <i class="bi bi-sort-numeric-down" id="sortDirIcon"></i> <span id="sortDirLabel">Desc</span>
+  </button>
   <button class="btn-refresh" id="rescanBtn" onclick="loadCandidates(true)">
     <i class="bi bi-arrow-clockwise" id="rescanIcon"></i> Rescan
   </button>
@@ -269,6 +291,10 @@
 
   <div class="summary-bar">
     <div class="summary-stats">
+      <div class="stat-item select-all-wrap">
+        <input type="checkbox" id="globalSelectAll" class="row-check" title="Select all / select none">
+        <label for="globalSelectAll">Select all</label>
+      </div>
       <div class="stat-item">
         <span class="stat-label">Selected</span>
         <span class="badge-pill" id="selCount">0</span>
@@ -334,6 +360,18 @@ let _preticked   = [];
 let _checked     = new Set();
 let _sectionOpen = { A: true, B: true, C1: true, C2: true, C3: false };
 
+// Sorting is purely a client-side, within-bucket presentation concern --
+// it never changes which bucket a row belongs to (that drives pre-tick
+// rules) and never touches _checked, so re-sorting cannot change selection.
+let _sortKey = "size"; // size | title | added | last_played | progress
+let _sortDir = "desc"; // matches today's implicit "largest first" order
+
+// Rebuilt on every renderSections() call. Used so bulk select-all/none
+// actions and the indeterminate-state refresh don't require re-rendering
+// the whole table on every checkbox tick.
+let _rowCheckboxEls = new Map(); // jf_id -> row checkbox element
+let _sectionMeta    = {};        // bucket -> { items, el: section select-all checkbox }
+
 let _lastPlanIds    = null; // Set of jf_ids the last successful /plan call covered
 let _lastPlanResult = null; // the /plan response body
 let _executing      = false;
@@ -376,6 +414,57 @@ function formatDate(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+// Progress means watched/episodes for a series and progress_pct for a
+// movie -- normalise both to a 0..1 fraction so the two kinds interleave
+// sensibly under a single sort key.
+function progressFraction(c) {
+  if (c.kind === "series") {
+    const episodes = c.episodes || 0;
+    return episodes > 0 ? (c.watched || 0) / episodes : 0;
+  }
+  return (Number(c.progress_pct) || 0) / 100;
+}
+
+// Numeric comparison where null/undefined/NaN always sorts last, regardless
+// of direction -- "never watched" must not jump to the top of an ascending
+// sort and look like an error.
+function compareNullableNumeric(a, b, dir) {
+  const aNull = (a === null || a === undefined || isNaN(a));
+  const bNull = (b === null || b === undefined || isNaN(b));
+  if (aNull && bNull) return 0;
+  if (aNull) return 1;
+  if (bNull) return -1;
+  return dir === "desc" ? (b - a) : (a - b);
+}
+
+function toTimeOrNull(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return isNaN(t) ? null : t;
+}
+
+function compareCandidates(a, b, key, dir) {
+  switch (key) {
+    case "title": {
+      const result = (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base", numeric: true });
+      return dir === "desc" ? -result : result;
+    }
+    case "added":
+      return compareNullableNumeric(toTimeOrNull(a.added), toTimeOrNull(b.added), dir);
+    case "last_played":
+      return compareNullableNumeric(toTimeOrNull(a.last_played), toTimeOrNull(b.last_played), dir);
+    case "progress": {
+      const result = progressFraction(a) - progressFraction(b);
+      return dir === "desc" ? -result : result;
+    }
+    case "size":
+    default: {
+      const result = (a.size_bytes || 0) - (b.size_bytes || 0);
+      return dir === "desc" ? -result : result;
+    }
+  }
 }
 
 function setsEqual(a, b) {
@@ -482,6 +571,11 @@ function renderSections() {
   const container = document.getElementById("sections");
   container.textContent = "";
 
+  // Fresh render -- drop stale references to detached elements from the
+  // previous render before rebuilding them.
+  _rowCheckboxEls = new Map();
+  _sectionMeta = {};
+
   const byBucket = {};
   BUCKET_ORDER.forEach(b => byBucket[b] = []);
   _candidates.forEach(c => { if (byBucket[c.bucket]) byBucket[c.bucket].push(c); });
@@ -495,9 +589,27 @@ function renderSections() {
   }
 
   BUCKET_ORDER.forEach(bucket => {
-    const items = byBucket[bucket];
+    // Sorting applies WITHIN each bucket only -- bucket membership (and
+    // therefore which rows are pre-ticked) never changes here.
+    const items = byBucket[bucket].slice().sort((a, b) => compareCandidates(a, b, _sortKey, _sortDir));
     container.appendChild(buildSection(bucket, items));
   });
+}
+
+function onSortChange() {
+  _sortKey = document.getElementById("sortKey").value;
+  renderSections();
+  updateSummary();
+}
+
+function toggleSortDir() {
+  _sortDir = _sortDir === "desc" ? "asc" : "desc";
+  const icon = document.getElementById("sortDirIcon");
+  const label = document.getElementById("sortDirLabel");
+  icon.className = "bi " + (_sortDir === "desc" ? "bi-sort-numeric-down" : "bi-sort-numeric-up");
+  label.textContent = _sortDir === "desc" ? "Desc" : "Asc";
+  renderSections();
+  updateSummary();
 }
 
 function buildSection(bucket, items) {
@@ -519,6 +631,24 @@ function buildSection(bucket, items) {
   headerRight.style.display = "flex";
   headerRight.style.alignItems = "center";
   headerRight.style.gap = ".6rem";
+
+  const sectionSelectWrap = el("div", { className: "select-all-wrap" });
+  const sectionSelectCb = document.createElement("input");
+  sectionSelectCb.type = "checkbox";
+  sectionSelectCb.className = "select-all-check";
+  sectionSelectCb.title = `Select all / none in ${_labels[bucket] || bucket}`;
+  sectionSelectCb.disabled = items.length === 0;
+  // Clicking this checkbox must not also toggle the section's open/closed
+  // state -- the header itself listens for clicks to expand/collapse.
+  sectionSelectCb.addEventListener("click", e => e.stopPropagation());
+  sectionSelectCb.addEventListener("change", () => {
+    selectAllInBucket(bucket, sectionSelectCb.checked);
+  });
+  sectionSelectWrap.addEventListener("click", e => e.stopPropagation());
+  sectionSelectWrap.appendChild(sectionSelectCb);
+  headerRight.appendChild(sectionSelectWrap);
+  _sectionMeta[bucket] = { items: items, el: sectionSelectCb };
+
   headerRight.appendChild(icon("bi bi-chevron-down section-chevron"));
   header.appendChild(headerRight);
 
@@ -591,6 +721,7 @@ function buildRow(c) {
     if (cb.checked) _checked.add(c.jf_id); else _checked.delete(c.jf_id);
     updateSummary();
   });
+  _rowCheckboxEls.set(c.jf_id, cb);
   tdCheck.appendChild(cb);
   tr.appendChild(tdCheck);
 
@@ -672,6 +803,58 @@ function updateSummary() {
   warnEl.style.display = hasFreeLessFlag ? "block" : "none";
 
   document.getElementById("preflightBtn").disabled = selected.length === 0;
+
+  updateSelectAllControls();
+}
+
+// Recomputes checked/indeterminate for the global and per-section
+// select-all checkboxes from the current _checked set. Called after every
+// individual tick, bulk action, sort, and reload so the controls never go
+// stale.
+function updateSelectAllControls() {
+  const globalCb = document.getElementById("globalSelectAll");
+  if (globalCb) {
+    const total = _candidates.length;
+    const selectedCount = _candidates.reduce((n, c) => n + (_checked.has(c.jf_id) ? 1 : 0), 0);
+    globalCb.checked = total > 0 && selectedCount === total;
+    globalCb.indeterminate = selectedCount > 0 && selectedCount < total;
+  }
+
+  Object.keys(_sectionMeta).forEach(bucket => {
+    const meta = _sectionMeta[bucket];
+    const total = meta.items.length;
+    const selectedCount = meta.items.reduce((n, c) => n + (_checked.has(c.jf_id) ? 1 : 0), 0);
+    meta.el.checked = total > 0 && selectedCount === total;
+    meta.el.indeterminate = selectedCount > 0 && selectedCount < total;
+  });
+}
+
+// ── Bulk selection ───────────────────────────────────────────────────────────
+// Both helpers mutate _checked directly and flip the already-rendered row
+// checkboxes via _rowCheckboxEls, rather than re-rendering the tables --
+// mirrors how a single row tick is handled, just applied to many rows.
+function selectAllInBucket(bucket, select) {
+  const meta = _sectionMeta[bucket];
+  if (!meta) return;
+  meta.items.forEach(c => {
+    if (select) _checked.add(c.jf_id); else _checked.delete(c.jf_id);
+    const rowCb = _rowCheckboxEls.get(c.jf_id);
+    if (rowCb) rowCb.checked = select;
+  });
+  updateSummary();
+}
+
+// Selects/deselects every visible candidate across every section -- this
+// intentionally includes C3 (Mid-watch) when the user explicitly asks for
+// "select all". C3 simply isn't pre-ticked on load; nothing here changes
+// that default.
+function selectAllGlobal(select) {
+  _candidates.forEach(c => {
+    if (select) _checked.add(c.jf_id); else _checked.delete(c.jf_id);
+    const rowCb = _rowCheckboxEls.get(c.jf_id);
+    if (rowCb) rowCb.checked = select;
+  });
+  updateSummary();
 }
 
 // ── Preflight ────────────────────────────────────────────────────────────────
@@ -924,6 +1107,10 @@ function buildJournalEntry(entry) {
 
   return row;
 }
+
+document.getElementById("globalSelectAll").addEventListener("change", function () {
+  selectAllGlobal(this.checked);
+});
 
 loadCandidates();
 </script>
