@@ -4,9 +4,13 @@ on:
   push:
     branches:
       - master
+      - dev
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - master
+      - dev
 
 env:
   REGISTRY: ghcr.io
@@ -22,6 +26,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "value=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
       # Pull requests build only — they never push, and Dependabot PRs get a
       # read-only token that cannot authenticate to GHCR.
@@ -39,7 +47,12 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=${{ steps.version.outputs.value }},enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             type=sha,prefix=
 
       - name: Build and push
@@ -49,3 +62,7 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.value }}
+            BUILD_SHA=${{ github.sha }}
+            BUILD_REF=${{ github.ref_name }}

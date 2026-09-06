@@ -93,3 +93,31 @@ CONFIG_PATH=./config/config.json python app/app.py
 ## License
 
 MIT
+
+## Versioning and branches
+
+The version lives in the repo-root `VERSION` file and is reported by
+`GET /api/health`:
+
+```json
+{"status": "ok", "build": {"version": "1.0.0", "sha": "a1b2c3d4e5f6", "ref": "dev"}}
+```
+
+`sha` and `ref` are baked in at image build time, so a running container tells
+you exactly which build it is. A local `docker build` with no build args reports
+the `VERSION` value with `sha`/`ref` of `unknown` — that is how you tell a local
+image from a CI one.
+
+### Branches and image tags
+
+| Push to | Image tags |
+|---|---|
+| `master` | `latest`, `<VERSION>`, `<sha>` |
+| `dev` | `dev`, `<sha>` |
+| tag `v*` | `1.2.3`, `1.2`, `1`, `<sha>` |
+| pull request | none — builds only, never pushes |
+
+Feature branches target `dev`; `dev` merges to `master` for a release.
+
+Releasing: bump `VERSION` on `master`, then push a matching `v<version>` git tag
+to publish the semver-tagged images.

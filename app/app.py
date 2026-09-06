@@ -3,6 +3,7 @@ import threading
 import requests
 from flask import Flask, jsonify, render_template, request as flask_request
 import config as cfg_mod
+import version
 
 _session    = requests.Session()
 _session_id = None
@@ -122,12 +123,19 @@ def save_settings():
 
 @app.route("/api/health")
 def health():
+    # Build identity is reported even when Transmission is unreachable — it is
+    # how you confirm which image a container is actually running.
+    build = version.info()
     try:
         cfg = _cfg()
         rpc_call("session-get", {"fields": ["version"]})
-        return jsonify({"status": "ok", "transmission": f"{cfg['transmission_host']}:{cfg['transmission_port']}"})
+        return jsonify({
+            "status": "ok",
+            "build": build,
+            "transmission": f"{cfg['transmission_host']}:{cfg['transmission_port']}",
+        })
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 503
+        return jsonify({"status": "error", "build": build, "error": str(e)}), 503
 
 
 @app.route("/api/test-connection", methods=["POST"])
