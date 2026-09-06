@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 import pytest
 from cleanup import candidates as C
@@ -243,3 +244,174 @@ def test_from_movie_handles_missing_media_sources():
     item = _movie_item()
     del item["MediaSources"]
     assert C.from_movie(item, {}).size_bytes == 0
+
+
+def test_from_movie_size_bytes_override_from_radarr():
+    c = C.from_movie(_movie_item(), {}, size_bytes=999)
+    assert c.size_bytes == 999
+
+
+# --- Sonarr statistics as the source of truth (Change 1) -------------------
+
+def test_from_series_episodes_and_size_from_sonarr_override():
+    # No RecursiveItemCount/MediaSources on the item at all -- matches the
+    # real Jellyfin Series payload -- so both values must come purely from
+    # the explicit Sonarr-derived overrides, not from the Jellyfin item.
+    item = {
+        "Id": "s1", "Name": "Show", "Path": "/share/series/Show",
+        "DateCreated": "2025-01-01T00:00:00.0000000Z",
+        "UserData": {"Played": False, "LastPlayedDate": None, "UnplayedItemCount": 6},
+    }
+    c = C.from_series(item, {}, episodes=16, size_bytes=32_000_000_000)
+    assert c.episodes == 16
+    assert c.size_bytes == 32_000_000_000
+    assert c.watched == 10  # 16 - 6 unplayed, using the Sonarr-provided total
+
+
+def test_from_series_8_of_16_watched_is_c3_not_a():
+    item = {
+        "Id": "bridgerton", "Name": "Bridgerton", "Path": "/share/series/Bridgerton",
+        "DateCreated": "2025-01-01T00:00:00.0000000Z",
+        "UserData": {"Played": False, "LastPlayedDate": None, "UnplayedItemCount": 8},
+    }
+    c = C.from_series(item, {}, episodes=16)
+    assert c.watched == 8
+    assert c.bucket == "C3"
+    assert c.bucket not in buckets.PRETICKED
+
+
+def test_from_series_no_sonarr_episodes_and_no_recursive_count_is_unavailable():
+    # No `episodes` override (no Sonarr owner) and no RecursiveItemCount on
+    # the Jellyfin item (the real-world case) -- the episode count itself is
+    # unknown, which must flag the title and keep it out of any pre-ticked
+    # bucket, distinct from (and regardless of) UnplayedItemCount.
+    item = {
+        "Id": "orphan", "Name": "Orphan Show", "Path": "/share/series/Orphan",
+        "DateCreated": "2025-01-01T00:00:00.0000000Z",
+        "UserData": {"Played": False, "LastPlayedDate": None, "UnplayedItemCount": 3},
+    }
+    c = C.from_series(item, {})
+    assert c.bucket not in buckets.PRETICKED
+    assert "episode-data-unavailable" in c.flags
+
+
+def test_from_series_no_sonarr_owner_falls_back_to_jellyfin_size():
+    item = {
+        "Id": "orphan2", "Name": "Orphan Show 2", "Path": "/share/series/Orphan2",
+        "DateCreated": "2025-01-01T00:00:00.0000000Z",
+        "UserData": {"Played": False, "LastPlayedDate": None},
+        "MediaSources": [{"Size": 555}],
+    }
+    c = C.from_series(item, {})
+    assert c.size_bytes == 555
+
+
+def test_sonarr_stats_returns_none_without_matching_owner():
+    by_id = C.sonarr_stats_by_id([
+        {"id": 1, "path": "/share/series/Show", "statistics": {"episodeCount": 10, "sizeOnDisk": 5}}
+    ])
+    assert C.sonarr_stats(None, None, by_id) == (None, None)
+    assert C.sonarr_stats("radarr", 1, by_id) == (None, None)
+
+
+def test_sonarr_stats_returns_episode_count_and_size_on_disk():
+    by_id = C.sonarr_stats_by_id([
+        {"id": 4, "path": "/share/series/Show", "statistics": {"episodeCount": 12, "sizeOnDisk": 777}}
+    ])
+    assert C.sonarr_stats("sonarr", 4, by_id) == (12, 777)
+
+
+def test_radarr_size_returns_size_on_disk():
+    by_id = C.radarr_stats_by_id([{"id": 9, "path": "/share/movies/Film", "sizeOnDisk": 42}])
+    assert C.radarr_size("radarr", 9, by_id) == 42
+
+
+def test_radarr_size_returns_none_without_matching_owner():
+    by_id = C.radarr_stats_by_id([{"id": 9, "path": "/share/movies/Film", "sizeOnDisk": 42}])
+    assert C.radarr_size("sonarr", 9, by_id) is None
+    assert C.radarr_size("radarr", 1, by_id) is None
+
+
+# --- guard_unavailable_bucket ------------------------------------------------
+
+def test_guard_unavailable_bucket_downgrades_preticked_bucket():
+    result = C.guard_unavailable_bucket(buckets.FULLY_WATCHED, ["episode-data-unavailable"])
+    assert result == buckets.MID_WATCH
+
+
+def test_guard_unavailable_bucket_downgrades_never_opened_when_episodes_unavailable():
+    # Unlike watch-count-unavailable, an unknown episode count means there
+    # is no reliable evidence at all -- not even "no play event" -- so
+    # bucket A gets no exemption here.
+    result = C.guard_unavailable_bucket(buckets.NEVER_OPENED, ["episode-data-unavailable"])
+    assert result == buckets.MID_WATCH
+
+
+def test_guard_unavailable_bucket_leaves_never_opened_alone_for_watch_count_only():
+    # Episodes ARE known here; only the watched count is missing.
+    # NEVER_OPENED is driven by last_played being genuinely absent, which
+    # doesn't depend on the watched count being accurate.
+    result = C.guard_unavailable_bucket(buckets.NEVER_OPENED, ["watch-count-unavailable"])
+    assert result == buckets.NEVER_OPENED
+
+
+def test_guard_unavailable_bucket_leaves_bucket_alone_without_flag():
+    result = C.guard_unavailable_bucket(buckets.FULLY_WATCHED, [])
+    assert result == buckets.FULLY_WATCHED
+
+
+# --- classify_viewer (Change 2) ---------------------------------------------
+
+def test_classify_viewer_series_finished():
+    assert C.classify_viewer("series", 16, 16, datetime(2026, 1, 1)) == "finished"
+    assert C.classify_viewer("series", 16, 20, datetime(2026, 1, 1)) == "finished"
+
+
+def test_classify_viewer_series_started():
+    assert C.classify_viewer("series", 16, 6, datetime(2026, 1, 1)) == "started"
+    # A play event with a watched count still 0 (e.g. episode data was
+    # unavailable for this user's pass) counts as started, not never-opened.
+    assert C.classify_viewer("series", 16, 0, datetime(2026, 1, 1)) == "started"
+
+
+def test_classify_viewer_series_never_opened():
+    assert C.classify_viewer("series", 16, 0, None) == "never_opened"
+
+
+def test_classify_viewer_movie_finished():
+    assert C.classify_viewer("movie", 1, 1, datetime(2026, 1, 1)) == "finished"
+
+
+def test_classify_viewer_movie_started():
+    assert C.classify_viewer("movie", 1, 0, datetime(2026, 1, 1)) == "started"
+
+
+def test_classify_viewer_movie_never_opened():
+    assert C.classify_viewer("movie", 1, 0, None) == "never_opened"
+
+
+# --- path_has_hardlink (Change 3) -------------------------------------------
+
+def test_path_has_hardlink_true_for_linked_file(tmp_tree):
+    linked = tmp_tree("a.mkv", linked=True)
+    assert C.path_has_hardlink(linked) is True
+
+
+def test_path_has_hardlink_false_for_unlinked_file(tmp_tree):
+    plain = tmp_tree("b.mkv", linked=False)
+    assert C.path_has_hardlink(plain) is False
+
+
+def test_path_has_hardlink_true_when_any_file_in_directory_is_linked(tmp_tree):
+    plain = tmp_tree("c.mkv", linked=False)
+    tmp_tree("d.mkv", linked=True)
+    directory = os.path.dirname(plain)
+    assert C.path_has_hardlink(directory) is True
+
+
+def test_path_has_hardlink_false_for_missing_path():
+    assert C.path_has_hardlink("/no/such/path/at/all") is False
+
+
+def test_path_has_hardlink_false_for_empty_path():
+    assert C.path_has_hardlink("") is False

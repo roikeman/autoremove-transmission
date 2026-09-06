@@ -140,7 +140,7 @@
     .table-scroll::-webkit-scrollbar-track { background: transparent; }
     .table-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
 
-    table { margin: 0; border-collapse: collapse; width: 100%; min-width: 900px; }
+    table { margin: 0; border-collapse: collapse; width: 100%; min-width: 1030px; }
     thead th {
       background: var(--surface2); color: var(--text-muted);
       font-size: .7rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
@@ -171,6 +171,17 @@
       color: #7aabf5; border-radius: 5px; padding: .15em .5em;
     }
     .owner-none { color: var(--text-muted); font-size: .78rem; }
+    .viewer-breakdown { font-size: .78rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .viewer-finished { color: #6fd98e; }
+    .viewer-started  { color: var(--warn); }
+    .viewer-dropped  { color: var(--text-muted); }
+    .viewer-sep { color: var(--text-muted); margin: 0 .2em; }
+    .hardlink-badge {
+      display: inline-flex; align-items: center; gap: .3em; margin-left: .4em;
+      background: rgba(224,92,92,.14); border: 1px solid rgba(224,92,92,.32);
+      color: #f0a0a0; border-radius: 5px; padding: .1em .45em; font-size: .68rem;
+      white-space: nowrap; vertical-align: middle;
+    }
     input.row-check, input.select-all-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 
     .empty-state { padding: 2.5rem; text-align: center; color: var(--text-muted); font-size: .85rem; }
@@ -671,6 +682,7 @@ const TABLE_COLUMNS = [
   { text: "Title" },
   { text: "Kind",        width: "70px"  },
   { text: "Progress",    width: "110px" },
+  { text: "Viewers",     width: "130px" },
   { text: "Size",        width: "100px" },
   { text: "Added",       width: "110px" },
   { text: "Last played", width: "110px" },
@@ -695,7 +707,7 @@ function buildTable(bucket, items) {
   if (items.length === 0) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 9;
+    td.colSpan = 10;
     td.appendChild(el("div", { className: "empty-state", text: "Nothing in this bucket." }));
     tr.appendChild(td);
     tbody.appendChild(tr);
@@ -729,6 +741,13 @@ function buildRow(c) {
   // Hebrew text or quotes; never rendered via innerHTML)
   const tdTitle = document.createElement("td");
   const nameDiv = el("div", { className: "torrent-name", text: c.title || "" });
+  if ((c.flags || []).includes("frees-less-than-listed")) {
+    const badge = el("span", { className: "hardlink-badge" });
+    badge.title = "Still held by a torrent -- deleting frees less than the listed size until confirmed by Preflight";
+    badge.appendChild(icon("bi bi-link-45deg"));
+    badge.appendChild(document.createTextNode(" seeding"));
+    nameDiv.appendChild(badge);
+  }
   const pathDiv = el("div", { className: "torrent-path", text: c.path || "" });
   tdTitle.appendChild(nameDiv);
   tdTitle.appendChild(pathDiv);
@@ -744,6 +763,20 @@ function buildRow(c) {
     : `${Math.round(c.progress_pct || 0)}%`;
   tdProgress.appendChild(el("span", { className: "date-text", text: progressText }));
   tr.appendChild(tdProgress);
+
+  // Viewers -- compact per-title breakdown across every Jellyfin user:
+  // "12✓ / 3▶ / 76·" = finished / started / never opened. Purely numeric,
+  // still built with textContent-only nodes for consistency with the rest
+  // of this table.
+  const tdViewers = document.createElement("td");
+  const viewers = el("span", { className: "viewer-breakdown" });
+  viewers.appendChild(el("span", { className: "viewer-finished", text: `${c.users_finished || 0}✓` }));
+  viewers.appendChild(el("span", { className: "viewer-sep", text: "/" }));
+  viewers.appendChild(el("span", { className: "viewer-started", text: `${c.users_started || 0}▶` }));
+  viewers.appendChild(el("span", { className: "viewer-sep", text: "/" }));
+  viewers.appendChild(el("span", { className: "viewer-dropped", text: `${c.users_dropped || 0}·` }));
+  tdViewers.appendChild(viewers);
+  tr.appendChild(tdViewers);
 
   // Size
   const tdSize = document.createElement("td");
