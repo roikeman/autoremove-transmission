@@ -216,11 +216,22 @@ underneath it.
    (Radarr: `movie`, `addImportExclusion=false`). One authoritative call
    removing both the entry and the library files. Removing the entry is what
    prevents a re-grab.
-2. **Transmission.** The torrent holds its own hardlink, so step 1 does not
-   disturb seeding — `nlink` merely drops to 1. The existing `is_deletable()`
-   predicate now identifies it, and it is removed with data.
-3. **Jellyfin.** `DELETE /Items/{id}` if the entry survives; otherwise a
+2. **Jellyfin.** `DELETE /Items/{id}` if the entry survives; otherwise a
    targeted library scan drops the stale row and its metadata.
+
+Then, **once per run after every title has been processed**, the Transmission
+sweep. The torrent holds its own hardlink, so step 1 does not disturb seeding —
+`nlink` merely drops to 1, and the existing `is_deletable()` predicate then
+identifies it.
+
+The sweep is scoped by inode: each candidate's `(st_dev, st_ino)` pairs are
+captured *before* its files are deleted, and a torrent is removed only if
+`is_deletable()` accepts it **and** one of its files matches a captured pair.
+An earlier design ran the sweep per-title and unscoped, which meant processing
+the first title removed every orphaned torrent library-wide — unrelated to the
+user's selection and outside the blast-radius caps, which only count candidate
+sizes. Inode scoping trades a possible missed sweep for never touching a
+torrent the user did not select; that is the safer direction.
 
 **For an unowned title:** delete files through the path-safety guard, then
 step 3.
