@@ -328,9 +328,30 @@
 </main>
 
 <script>
+// A slow/unreachable backend call can be killed by a browser or reverse-proxy
+// timeout before it produces a JSON body -- the caller then gets an
+// HTML/plain-text gateway error page instead, and a bare `resp.json()`
+// throws an opaque "unexpected non-whitespace character" SyntaxError that
+// tells the owner nothing. Read the body as text first and parse it
+// defensively so a non-JSON response surfaces the HTTP status and a short
+// body preview instead. A well-formed JSON error body still comes back
+// untouched, so callers keep showing the server's own `error` string
+// verbatim.
+async function parseJsonResponse(resp) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
+    throw new Error(
+      `HTTP ${resp.status} — server returned a non-JSON response: "${preview}"`
+    );
+  }
+}
+
 async function loadSettings() {
   const resp = await fetch("/api/settings");
-  const d    = await resp.json();
+  const d    = await parseJsonResponse(resp);
   document.getElementById("host").value     = d.transmission_host     || "";
   document.getElementById("port").value     = d.transmission_port     || "";
   document.getElementById("rpc_path").value = d.transmission_rpc_path || "";
@@ -387,7 +408,7 @@ async function testServiceConnection(service) {
         api_key: document.getElementById(service + "_api_key").value,
       }),
     });
-    const d = await resp.json();
+    const d = await parseJsonResponse(resp);
     if (resp.ok && d.status === "ok") {
       dot.className  = "conn-dot conn-ok";
       text.textContent = d.detail;
@@ -428,7 +449,7 @@ async function testConnection() {
         transmission_pass:     document.getElementById("pass").value,
       }),
     });
-    const d = await resp.json();
+    const d = await parseJsonResponse(resp);
     if (d.status === "ok") {
       dot.className  = "conn-dot conn-ok";
       text.textContent = "Connected to " + d.transmission;
@@ -483,7 +504,7 @@ async function saveSettings() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const d = await resp.json();
+    const d = await parseJsonResponse(resp);
     if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
 
     status.textContent = "Settings saved successfully.";

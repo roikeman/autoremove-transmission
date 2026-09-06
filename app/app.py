@@ -47,6 +47,10 @@ def _plan_path():
     return os.path.join(_state_dir(), "last_plan.json")
 
 
+def _candidates_cache_path():
+    return os.path.join(_state_dir(), "candidates_cache.json")
+
+
 @contextlib.contextmanager
 def _run_lock():
     """Cross-process mutual exclusion for a cleanup run.
@@ -124,6 +128,161 @@ def _clear_last_plan():
         os.remove(_plan_path())
     except OSError:
         pass
+
+
+def _save_candidates_cache(candidates, age_days, idle_days, scanned_at):
+    """Persist the last scan's candidate list to a file next to the config,
+    mirroring _save_last_plan. A 91-user Jellyfin makes a scan take minutes
+    (one HTTP round-trip per user per item type), so this is what lets
+    GET /api/library/candidates -- and the plan/execute calls that reuse it,
+    see _selected() -- avoid repeating that cost on every request.
+
+    No secrets are ever stored here: Candidate.to_dict() only carries
+    library metadata (titles, paths, sizes, timestamps), never credentials.
+    """
+    directory = _state_dir()
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    path = _candidates_cache_path()
+    tmp_path = path + ".tmp"
+    data = {
+        "candidates": [c.to_dict() for c in candidates],
+        "age_days": age_days,
+        "idle_days": idle_days,
+        "scanned_at": scanned_at,
+    }
+    with open(tmp_path, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp_path, path)
+
+
+def _load_candidates_cache():
+    """Read the persisted scan cache. Fails open to "no cache" (None) on a
+    missing or corrupt file -- same tolerant handling as _load_last_plan --
+    so a broken cache file just costs one extra scan instead of a 500."""
+    path = _candidates_cache_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not all(k in data for k in ("candidates", "age_days", "idle_days", "scanned_at")):
+        return None
+    if not isinstance(data["candidates"], list):
+        return None
+    return data
+
+
+def _clear_candidates_cache():
+    try:
+        os.remove(_candidates_cache_path())
+    except OSError:
+        pass
+
+
+def _candidate_from_cached_dict(d):
+    """Reconstruct a Candidate from one Candidate.to_dict() entry as stored
+    in the cache file. Validates each field defensively: an older cache
+    written before a field existed (missing key), or any field with an
+    unexpected type, raises KeyError/TypeError so the caller can treat the
+    whole cache as unusable and fall back to a fresh scan -- instead of
+    surfacing a 502, or letting a wrong-typed field (e.g. size_bytes as a
+    string) blow up later when candidates are sorted or summed.
+
+    added/last_played round-tripped through to_dict() into ISO strings (or
+    null), so cand.parse_dt -- the same parser used for Jellyfin's own
+    timestamps -- turns them back into datetimes.
+    """
+    def _str(key):
+        v = d[key]
+        if not isinstance(v, str):
+            raise TypeError(f"{key} must be a string")
+        return v
+
+    def _opt_str(key):
+        v = d[key]
+        if v is not None and not isinstance(v, str):
+            raise TypeError(f"{key} must be a string or null")
+        return v
+
+    def _int(key):
+        v = d[key]
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise TypeError(f"{key} must be an int")
+        return v
+
+    def _opt_int(key):
+        v = d[key]
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
+            raise TypeError(f"{key} must be an int or null")
+        return v
+
+    def _num(key):
+        v = d[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise TypeError(f"{key} must be a number")
+        return v
+
+    flags = d.get("flags") or []
+    if not isinstance(flags, list):
+        raise TypeError("flags must be a list")
+
+    return cand.Candidate(
+        jf_id=_str("jf_id"),
+        kind=_str("kind"),
+        title=_str("title"),
+        path=_str("path"),
+        size_bytes=_int("size_bytes"),
+        added=cand.parse_dt(d["added"]),
+        last_played=cand.parse_dt(d["last_played"]),
+        episodes=_int("episodes"),
+        watched=_int("watched"),
+        progress_pct=_num("progress_pct"),
+        owner=_opt_str("owner"),
+        owner_id=_opt_int("owner_id"),
+        bucket=_str("bucket"),
+        flags=list(flags),
+    )
+
+
+def _reconstruct_cached_candidates(cached):
+    """Rebuild every Candidate from a loaded cache dict's "candidates" list.
+    Returns None (never raises) if any entry is malformed, so callers can
+    treat that the same as "no cache" rather than a 502."""
+    try:
+        return [_candidate_from_cached_dict(d) for d in cached["candidates"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _scan_with_cache(cfg, force_refresh=False):
+    """Return (candidates, meta) for cfg's age/idle thresholds, sharing one
+    on-disk cache across /api/library/candidates, /plan and /execute.
+
+    The cache is served when it exists and its age_days/idle_days match the
+    thresholds this request is asking for; otherwise (missing/corrupt cache,
+    mismatched thresholds, or force_refresh) a fresh _scan() is run and its
+    result is cached for next time. meta carries "cached" (bool) and
+    "scanned_at" (ISO string) for the API response.
+    """
+    from datetime import datetime
+
+    age = int(cfg["age_days"])
+    idle = int(cfg["idle_days"])
+
+    if not force_refresh:
+        cached = _load_candidates_cache()
+        if cached is not None and cached["age_days"] == age and cached["idle_days"] == idle:
+            candidates = _reconstruct_cached_candidates(cached)
+            if candidates is not None:
+                return candidates, {"cached": True, "scanned_at": cached["scanned_at"]}
+
+    found = _scan(cfg)
+    scanned_at = datetime.now().isoformat()
+    _save_candidates_cache(found, age, idle, scanned_at)
+    return found, {"cached": False, "scanned_at": scanned_at}
 
 
 @app.route("/")
@@ -430,8 +589,10 @@ def api_candidates():
         if override:
             cfg[key] = int(override)
 
+    force_refresh = flask_request.args.get("refresh") == "1"
+
     try:
-        found = _scan(cfg)
+        found, meta = _scan_with_cache(cfg, force_refresh=force_refresh)
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
@@ -442,12 +603,40 @@ def api_candidates():
         "labels": buckets.LABELS,
         "age_days": cfg["age_days"],
         "idle_days": cfg["idle_days"],
+        "cached": meta["cached"],
+        "scanned_at": meta["scanned_at"],
     })
 
 
 def _selected(cfg, jf_ids):
+    # Design decision: plan/execute deliberately act on the SAME cached
+    # candidate set the user reviewed via GET /api/library/candidates,
+    # rather than triggering their own fresh (multi-minute) Jellyfin scan.
+    # That means the user acts on exactly the data they saw on screen,
+    # instead of a set that could have silently changed between viewing
+    # and confirming. This is safe because the pipeline is already
+    # idempotent: a title deleted in the meantime returns 404 from
+    # Sonarr/Radarr (treated as success) and a missing path frees 0 bytes.
+    #
+    # Unlike _scan_with_cache (used by GET /candidates), this deliberately
+    # does NOT require the cache's age_days/idle_days to match cfg's
+    # current defaults: cfg here is cfg_mod.load(), which never carries the
+    # per-request query-param overrides GET /candidates applied. Requiring
+    # a threshold match would force /plan and /execute back into a full
+    # synchronous rescan every time the user reviewed candidates with
+    # custom thresholds -- reintroducing the multi-minute timeout this
+    # cache exists to eliminate, on the two POST endpoints where it hurts
+    # most. The plan->execute selection guard (comparing jf_ids against the
+    # persisted last plan) and pipeline.execute's own blast-radius check
+    # still pin what actually gets deleted, independent of this choice.
     wanted = set(jf_ids)
-    return [c for c in _scan(cfg) if c.jf_id in wanted]
+
+    cached = _load_candidates_cache()
+    found = _reconstruct_cached_candidates(cached) if cached is not None else None
+    if found is None:
+        found, _meta = _scan_with_cache(cfg)
+
+    return [c for c in found if c.jf_id in wanted]
 
 
 @app.route("/api/library/plan", methods=["POST"])
@@ -501,6 +690,10 @@ def api_execute():
             return jsonify({"error": str(e)}), 502
 
     _clear_last_plan()
+    # The library just changed -- a cached candidate list would now list
+    # titles that no longer exist, so the next /candidates or /plan must
+    # re-scan rather than serve stale data.
+    _clear_candidates_cache()
     return jsonify({"results": results})
 
 
