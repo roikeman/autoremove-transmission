@@ -44,6 +44,11 @@ def classify(kind, episodes, watched, last_played, progress_pct):
 
     if episodes > 0 and watched >= episodes:
         return FULLY_WATCHED
+    # episodes == 0 with a play event is a Jellyfin metadata anomaly (not yet
+    # scanned, or mid-refresh) rather than evidence the series is disposable,
+    # so it must not land in a pre-ticked delete-by-default bucket.
+    if episodes == 0 and last_played is not None:
+        return MID_WATCH
     if watched <= 0:
         return SAMPLED
     if episodes > 0 and (watched / episodes) >= NEAR_COMPLETE_RATIO:

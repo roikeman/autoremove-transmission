@@ -29,8 +29,19 @@ def test_watched_exceeding_episodes_is_fully_watched():
 
 
 def test_zero_episode_series_never_divides_by_zero():
+    # Pins the safety property: episodes == 0 must never raise (no
+    # division by zero), whether or not there was a play event.
     assert buckets.classify("series", 0, 0, None, 0.0) == "A"
-    assert buckets.classify("series", 0, 0, T, 0.0) == "C2"
+    buckets.classify("series", 0, 0, T, 0.0)  # must not raise
+
+
+def test_zero_episode_series_with_play_event_is_not_preticked():
+    # Pins the business rule: episodes == 0 is a Jellyfin metadata anomaly
+    # (not yet scanned, or mid-refresh), not evidence the series is
+    # disposable. A play event must route it away from any pre-ticked
+    # delete-by-default bucket.
+    result = buckets.classify("series", 0, 0, T, 0.0)
+    assert result not in buckets.PRETICKED
 
 
 @pytest.mark.parametrize("watched,last_played,progress,expected", [
@@ -41,6 +52,12 @@ def test_zero_episode_series_never_divides_by_zero():
 ])
 def test_movie_buckets(watched, last_played, progress, expected):
     assert buckets.classify("movie", 1, watched, last_played, progress) == expected
+
+
+def test_movie_sampled_max_progress_boundary_is_strict():
+    assert buckets.classify("movie", 1, 0, T, 4.9) == "C2"
+    assert buckets.classify("movie", 1, 0, T, 5.0) == "C3"
+    assert buckets.classify("movie", 1, 0, T, 5.1) == "C3"
 
 
 def test_preticked_excludes_only_c3():
