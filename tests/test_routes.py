@@ -1,4 +1,6 @@
+import fcntl
 import json
+import os
 import pytest
 
 
@@ -108,3 +110,134 @@ def test_execute_succeeds_with_matching_selection(client, monkeypatch):
     resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
     assert resp.status_code == 200
     assert resp.get_json()["results"][0]["status"] == "deleted"
+
+
+# --- Cross-process lock (Critical 1) ---------------------------------------
+#
+# gunicorn runs this app as multiple worker PROCESSES (Dockerfile: --workers
+# 2). A threading.Lock is per-process, so two /execute requests routed to
+# different workers would each acquire their own uncontended lock and run
+# in parallel. These tests hold the lock file from a *separate* file
+# descriptor (as a second process would), which a threading.Lock could
+# never see contention from -- so they fail against the pre-fix code.
+
+def _plan_a(client, monkeypatch, app_module):
+    import config
+    config.save({"jellyfin_url": "https://jf", "jellyfin_api_key": "secret-key"})
+    from cleanup.candidates import Candidate
+
+    candidate = Candidate(jf_id="1", kind="movie", title="A", path="/x/a", size_bytes=10,
+                           added=None, last_played=None, episodes=1, watched=0,
+                           progress_pct=0.0, owner=None, owner_id=None, bucket="A")
+    monkeypatch.setattr(app_module, "_scan", lambda cfg: [candidate])
+    resp = client.post("/api/library/plan", json={"jf_ids": ["1"]})
+    assert resp.status_code == 200
+
+
+def test_lock_file_created_and_blocks_concurrent_execute(client, monkeypatch):
+    import app as app_module
+
+    _plan_a(client, monkeypatch, app_module)
+    monkeypatch.setattr(
+        app_module.pipeline, "execute",
+        lambda selection, cfg, clients: [{"jf_id": "1", "title": "A", "status": "deleted"}])
+
+    lock_path = app_module._lock_path()
+
+    # Hold the lock the way a second gunicorn worker process would: a
+    # wholly separate open file descriptor on the same path.
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    holder_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert os.path.exists(lock_path)
+        resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
+        assert resp.status_code == 409
+        assert "already in progress" in resp.get_json()["error"].lower()
+    finally:
+        fcntl.flock(holder_fd, fcntl.LOCK_UN)
+        os.close(holder_fd)
+
+    # Once the other "worker" releases it, the same request succeeds and
+    # the app's own lock is released afterward too.
+    resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
+    assert resp.status_code == 200
+
+    check_fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(check_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if still held
+    finally:
+        fcntl.flock(check_fd, fcntl.LOCK_UN)
+        os.close(check_fd)
+
+
+def test_lock_released_even_when_execute_raises(client, monkeypatch):
+    import app as app_module
+
+    _plan_a(client, monkeypatch, app_module)
+
+    def boom(selection, cfg, clients):
+        raise RuntimeError("simulated mid-run failure")
+
+    monkeypatch.setattr(app_module.pipeline, "execute", boom)
+
+    resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
+    assert resp.status_code == 502
+
+    lock_path = app_module._lock_path()
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if still held
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+# --- Persisted plan across workers (Important 2) ----------------------------
+#
+# _last_plan used to be a module-level dict, invisible to a request handled
+# by a different worker process. These tests clear the in-process attribute
+# a naive fix might still rely on (harmless no-op against the file-backed
+# implementation) to prove the check really goes through disk.
+
+def test_persisted_plan_survives_different_worker(client, monkeypatch):
+    import app as app_module
+
+    _plan_a(client, monkeypatch, app_module)
+    monkeypatch.setattr(
+        app_module.pipeline, "execute",
+        lambda selection, cfg, clients: [{"jf_id": "1", "title": "A", "status": "deleted"}])
+
+    # Simulate the execute request landing on a different gunicorn worker:
+    # its module-level Python state starts fresh. Reset whatever in-process
+    # bookkeeping might still exist -- fatal to the old in-memory dict,
+    # a no-op against the persisted-file implementation.
+    monkeypatch.setattr(app_module, "_last_plan", {"ids": set()}, raising=False)
+
+    # Confirm the persisted file itself is what carries the selection.
+    with open(app_module._plan_path()) as f:
+        assert json.load(f)["ids"] == ["1"]
+
+    resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
+    assert resp.status_code == 200
+    assert resp.get_json()["results"][0]["status"] == "deleted"
+
+
+def test_missing_plan_file_fails_closed(client):
+    import config
+    config.save({"jellyfin_url": "https://jf", "jellyfin_api_key": "secret-key"})
+
+    resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
+    assert resp.status_code == 409
+
+
+def test_corrupt_plan_file_fails_closed(client, monkeypatch):
+    import app as app_module
+
+    _plan_a(client, monkeypatch, app_module)
+
+    with open(app_module._plan_path(), "w") as f:
+        f.write("{not valid json")
+
+    resp = client.post("/api/library/execute", json={"jf_ids": ["1"]})
+    assert resp.status_code == 409

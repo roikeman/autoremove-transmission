@@ -1,5 +1,8 @@
+import contextlib
+import errno
+import fcntl
+import json
 import os
-import threading
 import requests
 from flask import Flask, jsonify, render_template, request as flask_request
 import config as cfg_mod
@@ -25,8 +28,102 @@ app = Flask(__name__)
 # check the raw text should see the same characters config.py produces.
 app.json.ensure_ascii = False
 
-_run_lock = threading.Lock()
-_last_plan = {"ids": set()}
+
+def _state_dir():
+    """Directory next to the config file, for the lock and plan files.
+
+    Derived from config.CONFIG_PATH (not hardcoded) so tests can redirect
+    both the config and this state into tmp_path.
+    """
+    directory = os.path.dirname(cfg_mod.CONFIG_PATH)
+    return directory if directory else "."
+
+
+def _lock_path():
+    return os.path.join(_state_dir(), "cleanup.lock")
+
+
+def _plan_path():
+    return os.path.join(_state_dir(), "last_plan.json")
+
+
+@contextlib.contextmanager
+def _run_lock():
+    """Cross-process mutual exclusion for a cleanup run.
+
+    gunicorn runs this app as multiple worker PROCESSES (see Dockerfile),
+    so a threading.Lock -- which is per-process -- cannot prevent two
+    workers from each starting a run at the same time. An flock()'d file
+    is visible to every process on the host, so it actually serializes
+    concurrent /api/library/execute calls regardless of which worker
+    handles them.
+    """
+    directory = _state_dir()
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    path = _lock_path()
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EAGAIN):
+                os.close(fd)
+                yield False
+                return
+            os.close(fd)
+            raise
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _save_last_plan(jf_ids):
+    """Persist the plan's selected id set to a file next to the config.
+
+    Module-level Python state doesn't survive across gunicorn worker
+    processes, so a plan served by one worker would be invisible to an
+    execute routed to another. Writing the selection to disk makes the
+    preflight guard work regardless of which worker handles each request.
+    No secrets are ever stored here -- only the opaque jf_ids.
+    """
+    directory = _state_dir()
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    path = _plan_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump({"ids": sorted(jf_ids)}, f)
+    os.replace(tmp_path, path)
+
+
+def _load_last_plan():
+    """Read the persisted plan's id set. Fails closed: a missing or corrupt
+    file is treated as "no plan recorded" (empty set), so execute's
+    equality check against it will not spuriously match."""
+    path = _plan_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        ids = data.get("ids")
+        if not isinstance(ids, list):
+            return set()
+        return set(ids)
+    except (OSError, ValueError):
+        return set()
+
+
+def _clear_last_plan():
+    try:
+        os.remove(_plan_path())
+    except OSError:
+        pass
 
 
 @app.route("/")
@@ -369,7 +466,7 @@ def api_plan():
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
-    _last_plan["ids"] = {c.jf_id for c in selection}
+    _save_last_plan({c.jf_id for c in selection})
     return jsonify(result)
 
 
@@ -383,25 +480,27 @@ def api_execute():
 
     # Refuse a selection that doesn't match the last /plan response: the
     # library may have changed since a stale browser tab last preflighted.
-    if set(jf_ids) != _last_plan["ids"]:
+    # The comparison set is persisted to disk (see _load_last_plan) so this
+    # still works when the /plan and /execute requests land on different
+    # gunicorn worker processes.
+    if set(jf_ids) != _load_last_plan():
         return jsonify({"error": "selection changed since preflight; re-run the plan"}), 409
 
-    if not _run_lock.acquire(blocking=False):
-        return jsonify({"error": "a cleanup run is already in progress"}), 409
+    with _run_lock() as acquired:
+        if not acquired:
+            return jsonify({"error": "a cleanup run is already in progress"}), 409
 
-    try:
-        selection = _selected(cfg, jf_ids)
-        # Note: execute() re-checks the blast-radius caps itself, so a second
-        # pipeline.plan() call here would be redundant -- omitted.
-        results = pipeline.execute(selection, cfg, _build_clients(cfg))
-    except pipeline.BlastRadiusExceeded as e:
-        return jsonify({"error": str(e), "blast_radius": True}), 409
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
-    finally:
-        _run_lock.release()
+        try:
+            selection = _selected(cfg, jf_ids)
+            # Note: execute() re-checks the blast-radius caps itself, so a second
+            # pipeline.plan() call here would be redundant -- omitted.
+            results = pipeline.execute(selection, cfg, _build_clients(cfg))
+        except pipeline.BlastRadiusExceeded as e:
+            return jsonify({"error": str(e), "blast_radius": True}), 409
+        except Exception as e:
+            return jsonify({"error": str(e)}), 502
 
-    _last_plan["ids"] = set()
+    _clear_last_plan()
     return jsonify({"results": results})
 
 
