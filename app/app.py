@@ -225,6 +225,20 @@ def _candidate_from_cached_dict(d):
             raise TypeError(f"{key} must be a number")
         return v
 
+    def _int_default(key, default=0):
+        # Unlike _int, a MISSING key is not a corruption -- it just means
+        # this entry was cached before the users_finished/started/dropped
+        # viewer-breakdown fields existed, so it defaults rather than
+        # raising. A key that IS present with the wrong type still raises,
+        # same as every other field here, since that indicates real
+        # corruption rather than an old cache shape.
+        if key not in d:
+            return default
+        v = d[key]
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise TypeError(f"{key} must be an int")
+        return v
+
     flags = d.get("flags") or []
     if not isinstance(flags, list):
         raise TypeError("flags must be a list")
@@ -244,6 +258,9 @@ def _candidate_from_cached_dict(d):
         owner_id=_opt_int("owner_id"),
         bucket=_str("bucket"),
         flags=list(flags),
+        users_finished=_int_default("users_finished"),
+        users_started=_int_default("users_started"),
+        users_dropped=_int_default("users_dropped"),
     )
 
 
@@ -524,7 +541,18 @@ def _build_clients(cfg):
 
 
 def _scan(cfg):
-    """Build the full candidate list. Merges user data across all Jellyfin users."""
+    """Build the full candidate list. Merges user data across all Jellyfin users.
+
+    Series episode counts and file sizes come from Sonarr's `statistics`
+    object (episodeCount, sizeOnDisk) on the /api/v3/series response --
+    already fetched once here to build the owner index -- rather than from
+    a per-user, per-series Jellyfin episode fetch. On a 91-user server with
+    ~75 stale series, that per-episode fetch was ~6,800 extra HTTP round
+    trips (91 users x 75 series); this reads real numbers off data already
+    in hand, at zero extra API calls. `JellyfinClient.episodes()` stays
+    available on the client for callers that still want it -- it is simply
+    no longer called from here.
+    """
     from datetime import datetime
 
     jf = JellyfinClient(cfg["jellyfin_url"], cfg["jellyfin_api_key"])
@@ -536,39 +564,91 @@ def _scan(cfg):
     if cfg.get("radarr_url"):
         radarr_items = ArrClient(cfg["radarr_url"], cfg["radarr_api_key"], "radarr").list_items()
     owner_index = cand.build_owner_index(sonarr_items, radarr_items)
+    sonarr_by_id = cand.sonarr_stats_by_id(sonarr_items)
+    radarr_by_id = cand.radarr_stats_by_id(radarr_items)
+
+    users = jf.users()
 
     merged = {}
-    for user in jf.users():
+    for user in users:
         uid = user["Id"]
         for item in jf.items(uid, "Series"):
-            _merge(merged, cand.from_series(item, owner_index))
+            path = item.get("Path") or ""
+            owner, owner_id = cand.match_owner(path, owner_index)
+            episodes, size_bytes = cand.sonarr_stats(owner, owner_id, sonarr_by_id)
+            _merge(merged, cand.from_series(item, owner_index, episodes=episodes, size_bytes=size_bytes))
         for item in jf.items(uid, "Movie"):
-            _merge(merged, cand.from_movie(item, owner_index))
+            path = item.get("Path") or ""
+            owner, owner_id = cand.match_owner(path, owner_index)
+            size_bytes = cand.radarr_size(owner, owner_id, radarr_by_id)
+            _merge(merged, cand.from_movie(item, owner_index, size_bytes=size_bytes))
 
     now = datetime.now()
     age = int(cfg["age_days"])
     idle = int(cfg["idle_days"])
-    return [c for c in merged.values()
-            if cand.is_stale(c.added, c.last_played, now, age, idle)]
+
+    result = []
+    for c in merged.values():
+        if not cand.is_stale(c.added, c.last_played, now, age, idle):
+            continue
+        # Hardlink check only runs for titles that actually survive the
+        # stale filter, and only stats this one candidate's own path (never
+        # the whole library) -- see cand.path_has_hardlink.
+        has_hardlink = cand.path_has_hardlink(c.path)
+        # quality_flags recomputes the two flags it owns (added-date and
+        # hardlink); any other flag already on the candidate (e.g.
+        # "episode-data-unavailable") is a distinct data-quality fact that
+        # must survive this recompute, not be wiped by it.
+        auto_flags = {"added-date-unreliable", "frees-less-than-listed"}
+        extra_flags = [f for f in c.flags if f not in auto_flags]
+        c.flags = buckets.quality_flags(c.added, c.last_played, has_hardlink) + extra_flags
+        result.append(c)
+
+    return result
 
 
 def _merge(store, candidate):
-    """Keep the most-watched, most-recently-played view across users."""
+    """Keep the most-watched, most-recently-played view across users, and
+    accumulate the per-user viewer breakdown (users_finished/started/dropped)
+    behind the compact "12 finished / 3 started / 76 never opened" UI column
+    (see candidates.classify_viewer for the exact definitions).
+
+    Data-quality flags set by candidates.from_series (e.g.
+    "episode-data-unavailable", "watch-count-unavailable") describe a fact
+    about the title itself, not about any one user's view of it, so they
+    must survive every merge -- with up to 91 users, losing them on the
+    second merge would silently defeat the "never pre-tick on unknown data"
+    guarantee the flag exists to uphold.
+    """
+    verdict = cand.classify_viewer(
+        candidate.kind, candidate.episodes, candidate.watched, candidate.last_played)
+
     existing = store.get(candidate.jf_id)
     if existing is None:
         store[candidate.jf_id] = candidate
-        return
+        existing = candidate
+    else:
+        if candidate.watched > existing.watched:
+            existing.watched = candidate.watched
+        if candidate.last_played and (
+                existing.last_played is None or candidate.last_played > existing.last_played):
+            existing.last_played = candidate.last_played
+        existing.progress_pct = max(existing.progress_pct, candidate.progress_pct)
+        existing.bucket = buckets.classify(
+            existing.kind, existing.episodes, existing.watched,
+            existing.last_played, existing.progress_pct)
 
-    if candidate.watched > existing.watched:
-        existing.watched = candidate.watched
-    if candidate.last_played and (
-            existing.last_played is None or candidate.last_played > existing.last_played):
-        existing.last_played = candidate.last_played
-    existing.progress_pct = max(existing.progress_pct, candidate.progress_pct)
-    existing.bucket = buckets.classify(
-        existing.kind, existing.episodes, existing.watched,
-        existing.last_played, existing.progress_pct)
-    existing.flags = buckets.quality_flags(existing.added, existing.last_played, False)
+        auto_flags = {"added-date-unreliable", "frees-less-than-listed"}
+        extra_flags = [f for f in existing.flags if f not in auto_flags]
+        existing.flags = buckets.quality_flags(existing.added, existing.last_played, False) + extra_flags
+        existing.bucket = cand.guard_unavailable_bucket(existing.bucket, existing.flags)
+
+    if verdict == "finished":
+        existing.users_finished += 1
+    elif verdict == "started":
+        existing.users_started += 1
+    else:
+        existing.users_dropped += 1
 
 
 @app.route("/library")
