@@ -1,0 +1,143 @@
+from datetime import datetime
+import pytest
+from cleanup import candidates as C
+
+NOW = datetime(2026, 9, 6)
+
+
+def test_parse_dt_handles_jellyfin_iso():
+    assert C.parse_dt("2025-08-23T22:44:18.6029234Z") == datetime(2025, 8, 23, 22, 44, 18)
+
+
+def test_parse_dt_handles_none_and_empty():
+    assert C.parse_dt(None) is None
+    assert C.parse_dt("") is None
+
+
+def test_stale_requires_both_conditions():
+    old = datetime(2025, 1, 1)
+    recent = datetime(2026, 8, 1)
+    # old enough, idle long enough
+    assert C.is_stale(old, datetime(2026, 1, 1), NOW, 180, 90) is True
+    # old enough but played recently
+    assert C.is_stale(old, recent, NOW, 180, 90) is False
+    # never played but added recently
+    assert C.is_stale(datetime(2026, 8, 1), None, NOW, 180, 90) is False
+    # never played and old
+    assert C.is_stale(old, None, NOW, 180, 90) is True
+
+
+def test_owner_index_maps_paths():
+    idx = C.build_owner_index(
+        [{"id": 1, "path": "/share/series/Show"}],
+        [{"id": 7, "path": "/share/movies/Film"}],
+    )
+    assert idx["/share/series/Show"] == ("sonarr", 1)
+    assert idx["/share/movies/Film"] == ("radarr", 7)
+
+
+def test_match_owner_exact():
+    idx = {"/share/series/Show": ("sonarr", 1)}
+    assert C.match_owner("/share/series/Show", idx) == ("sonarr", 1)
+
+
+def test_match_owner_by_prefix():
+    idx = {"/share/series/Show": ("sonarr", 1)}
+    assert C.match_owner("/share/series/Show/Season 1/ep.mkv", idx) == ("sonarr", 1)
+
+
+def test_match_owner_does_not_match_sibling_prefix():
+    idx = {"/share/series/Show": ("sonarr", 1)}
+    assert C.match_owner("/share/series/ShowTwo", idx) == (None, None)
+
+
+def test_match_owner_unowned():
+    assert C.match_owner("/share/reality/Thing", {}) == (None, None)
+
+
+def _series_item(**over):
+    item = {
+        "Id": "s1",
+        "Name": "Test Show",
+        "Path": "/share/series/Show",
+        "DateCreated": "2025-01-01T00:00:00.0000000Z",
+        "DateLastMediaAdded": "2025-02-01T00:00:00.0000000Z",
+        "UserData": {"Played": False, "LastPlayedDate": None, "UnplayedItemCount": 2},
+        "RecursiveItemCount": 10,
+    }
+    item.update(over)
+    return item
+
+
+def test_from_series_computes_watched_from_unplayed_count():
+    c = C.from_series(_series_item(), {})
+    assert c.episodes == 10
+    assert c.watched == 8
+    assert c.bucket == "C1"
+
+
+def test_from_series_uses_date_last_media_added():
+    c = C.from_series(_series_item(), {})
+    assert c.added == datetime(2025, 2, 1)
+
+
+def test_from_series_falls_back_to_date_created():
+    item = _series_item()
+    del item["DateLastMediaAdded"]
+    assert C.from_series(item, {}).added == datetime(2025, 1, 1)
+
+
+def test_from_series_assigns_owner():
+    idx = {"/share/series/Show": ("sonarr", 4)}
+    c = C.from_series(_series_item(), idx)
+    assert (c.owner, c.owner_id) == ("sonarr", 4)
+
+
+def test_from_series_unowned_is_none():
+    c = C.from_series(_series_item(), {})
+    assert c.owner is None
+
+
+def test_from_series_flags_unreliable_added_date():
+    c = C.from_series(_series_item(
+        DateLastMediaAdded="2025-12-29T00:00:00.0000000Z",
+        UserData={"Played": False, "LastPlayedDate": "2025-11-21T00:00:00.0000000Z",
+                  "UnplayedItemCount": 0},
+    ), {})
+    assert "added-date-unreliable" in c.flags
+
+
+def _movie_item(**over):
+    item = {
+        "Id": "m1",
+        "Name": "Test Film",
+        "Path": "/share/movies/Film/film.mkv",
+        "DateCreated": "2025-03-01T00:00:00.0000000Z",
+        "UserData": {"Played": True, "LastPlayedDate": "2026-01-01T00:00:00.0000000Z",
+                     "PlayedPercentage": 100.0},
+        "MediaSources": [{"Size": 4294967296}],
+    }
+    item.update(over)
+    return item
+
+
+def test_from_movie_watched():
+    c = C.from_movie(_movie_item(), {})
+    assert c.kind == "movie"
+    assert c.watched == 1
+    assert c.bucket == "B"
+    assert c.size_bytes == 4294967296
+
+
+def test_from_movie_sampled_has_no_resume_point():
+    c = C.from_movie(_movie_item(
+        UserData={"Played": False, "LastPlayedDate": "2026-01-01T00:00:00.0000000Z"},
+    ), {})
+    assert c.progress_pct == 0.0
+    assert c.bucket == "C2"
+
+
+def test_from_movie_handles_missing_media_sources():
+    item = _movie_item()
+    del item["MediaSources"]
+    assert C.from_movie(item, {}).size_bytes == 0
