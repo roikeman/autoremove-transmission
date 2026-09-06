@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .env
 config/config.json
+.pytest_cache/
+tests/fixtures/*.local.json
+.venv/
