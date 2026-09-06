@@ -29,9 +29,8 @@ def settings_page():
 
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
-    cfg = _cfg()
-    safe = dict(cfg)
-    safe["transmission_pass"] = "••••••••" if cfg["transmission_pass"] else ""
+    safe = cfg_mod.mask(cfg_mod.load())
+    safe["env_locked"] = sorted(cfg_mod.env_locked())
     return jsonify(safe)
 
 
@@ -41,11 +40,6 @@ def save_settings():
     if data is None:
         return jsonify({"error": "Invalid JSON"}), 400
 
-    # If password placeholder was sent back, keep existing password
-    current = cfg_mod.load()
-    if data.get("transmission_pass", "").startswith("••"):
-        data["transmission_pass"] = current["transmission_pass"]
-
     try:
         saved = cfg_mod.save(data)
     except Exception as e:
@@ -53,7 +47,7 @@ def save_settings():
     # Reset RPC session so next call re-authenticates with new settings
     reset_session()
 
-    return jsonify({"status": "ok", "settings": {k: v for k, v in saved.items() if k != "transmission_pass"}})
+    return jsonify({"status": "ok", "settings": cfg_mod.mask(saved)})
 
 
 @app.route("/api/health")
