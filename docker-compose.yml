@@ -7,4 +7,10 @@ services:
     volumes:
       - /share:/share:rw
       - ./config:/config
+    environment:
+      # Optional. When set, these override the values stored in config.json
+      # and render the corresponding settings field read-only.
+      - JELLYFIN_API_KEY=${JELLYFIN_API_KEY:-}
+      - SONARR_API_KEY=${SONARR_API_KEY:-}
+      - RADARR_API_KEY=${RADARR_API_KEY:-}
     restart: unless-stopped
