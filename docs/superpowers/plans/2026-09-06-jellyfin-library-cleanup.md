@@ -2776,7 +2776,9 @@ services:
 
 - [ ] **Step 2: Run tests in CI**
 
-In `.github/workflows/docker.yml`, add a job that runs before the image build:
+`.github/workflows/docker.yml` already triggers on pull requests and maps
+branches to image tags (`master` -> `latest` + `<VERSION>`, `dev` -> `dev`).
+Leave that intact and add a test job that gates the build:
 
 ```yaml
   test:
@@ -2796,7 +2798,18 @@ Add `needs: test` to the existing build job.
 
 Add a `## Library cleanup` section to `README.md` covering: what it does, the two thresholds and their defaults, the five buckets and why C3 is never pre-selected, the three-step deletion order, the seeding guard, the blast-radius caps, that **deletions cannot be undone**, and how to supply the three API keys (settings UI, or environment override).
 
-- [ ] **Step 4: Full verification**
+- [ ] **Step 4: Bump the version**
+
+This adds a feature, so bump the minor version:
+
+```bash
+echo "1.1.0" > VERSION
+```
+
+`/api/health` will then report `1.1.0`, and merging to `master` publishes the
+`1.1.0` image tag alongside `latest`.
+
+- [ ] **Step 5: Full verification**
 
 ```bash
 pytest -v
@@ -2805,11 +2818,11 @@ docker compose build
 
 Expected: all tests pass; image builds.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add docker-compose.yml README.md .github/workflows/docker.yml
-git commit -m "chore: wire up CI tests, compose env, and docs"
+git add docker-compose.yml README.md .github/workflows/docker.yml VERSION
+git commit -m "chore: wire up CI tests, compose env, docs, and version bump"
 ```
 
 ---
@@ -2838,16 +2851,27 @@ Record the output. The container must be recreated with exactly these mounts,
 network mode, and port bindings — do not assume the values in
 `docker-compose.yml` match what is actually deployed.
 
-- [ ] **Step 2: Build the image from the feature branch**
+- [ ] **Step 2: Publish a test image via the dev branch**
 
-Push the branch, let CI build it, then pull the tagged image:
+Merge this feature branch into `dev`. CI publishes the `dev` tag on every push
+to that branch, which is exactly what this container should track:
 
 ```bash
-ssh froike@192.168.1.132 'docker pull ghcr.io/roikeman/autoremove-transmission:<sha>'
+ssh froike@192.168.1.132 'docker pull ghcr.io/roikeman/autoremove-transmission:dev'
 ```
 
-Use the commit SHA tag, never `latest` — `latest` tracks `master` and would not
-contain the feature under test.
+Never use `latest` — it tracks `master` and will not contain the feature under
+test. If you need to pin an exact build rather than follow `dev`, use the commit
+SHA tag that the same run publishes alongside it.
+
+Confirm the container reports the build you expect once it is running:
+
+```bash
+ssh froike@192.168.1.132 'curl -s localhost:5000/api/health'
+```
+
+The `build.ref` field must read `dev`, and `build.sha` must match the commit you
+merged.
 
 - [ ] **Step 3: Recreate the container**
 
