@@ -14,6 +14,31 @@ def test_parse_dt_handles_none_and_empty():
     assert C.parse_dt("") is None
 
 
+def test_parse_dt_z_suffix_is_naive():
+    result = C.parse_dt("2025-08-23T22:44:18Z")
+    assert result == datetime(2025, 8, 23, 22, 44, 18)
+    assert result.tzinfo is None
+
+
+def test_parse_dt_positive_offset_is_naive():
+    result = C.parse_dt("2025-08-23T22:44:18+03:00")
+    assert result == datetime(2025, 8, 23, 22, 44, 18)
+    assert result.tzinfo is None
+
+
+def test_parse_dt_negative_offset_is_naive():
+    result = C.parse_dt("2025-08-23T22:44:18-05:00")
+    assert result == datetime(2025, 8, 23, 22, 44, 18)
+    assert result.tzinfo is None
+
+
+def test_is_stale_with_negative_offset_parsed_value_does_not_raise():
+    added = C.parse_dt("2025-01-01T00:00:00-05:00")
+    last_played = C.parse_dt("2025-01-02T00:00:00-05:00")
+    # This raised TypeError (naive vs. aware) before the parse_dt fix.
+    assert C.is_stale(added, last_played, NOW, 180, 90) is True
+
+
 def test_stale_requires_both_conditions():
     old = datetime(2025, 1, 1)
     recent = datetime(2026, 8, 1)
@@ -53,6 +78,27 @@ def test_match_owner_does_not_match_sibling_prefix():
 
 def test_match_owner_unowned():
     assert C.match_owner("/share/reality/Thing", {}) == (None, None)
+
+
+def test_match_owner_picks_most_specific_nested_owner_parent_first():
+    # /share/series inserted before /share/series/Show (Sonarr-before-Radarr
+    # insertion order). The more specific nested owner must still win.
+    idx = {
+        "/share/series": ("radarr", 1),
+        "/share/series/Show": ("sonarr", 2),
+    }
+    assert C.match_owner("/share/series/Show/Season 1/ep.mkv", idx) == ("sonarr", 2)
+
+
+def test_match_owner_picks_most_specific_nested_owner_child_first():
+    # Same two owners, reversed insertion order. Result must be identical to
+    # the parent-first case above -- proving it no longer depends on dict
+    # insertion order.
+    idx = {
+        "/share/series/Show": ("sonarr", 2),
+        "/share/series": ("radarr", 1),
+    }
+    assert C.match_owner("/share/series/Show/Season 1/ep.mkv", idx) == ("sonarr", 2)
 
 
 def _series_item(**over):

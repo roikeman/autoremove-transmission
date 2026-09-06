@@ -1,8 +1,11 @@
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from cleanup import buckets
+
+_OFFSET_RE = re.compile(r"(?:Z|[+-]\d{2}:\d{2})$")
 
 
 @dataclass
@@ -42,10 +45,15 @@ class Candidate:
 
 
 def parse_dt(value):
-    """Parse a Jellyfin timestamp. Sub-second precision exceeds datetime's range."""
+    """Parse a Jellyfin timestamp. Sub-second precision exceeds datetime's range.
+
+    Always returns a naive datetime (or None): any Z/+HH:MM/-HH:MM offset
+    suffix is stripped, not applied, so the result is consistent with every
+    other (naive) datetime in this codebase.
+    """
     if not value:
         return None
-    text = str(value).replace("Z", "").split("+")[0]
+    text = _OFFSET_RE.sub("", str(value))
     if "." in text:
         text = text.split(".")[0]
     try:
@@ -74,16 +82,23 @@ def build_owner_index(sonarr_items, radarr_items):
 
 
 def match_owner(path, index):
-    """Exact match, else the nearest ancestor directory. Never a sibling prefix."""
+    """Exact match, else the most specific (longest) matching ancestor
+    directory. Never a sibling prefix. The result must not depend on the
+    index's insertion order when multiple ancestors match (e.g. nested
+    library roots)."""
     if not path:
         return (None, None)
     norm = os.path.normpath(path)
     if norm in index:
         return index[norm]
+    best_path = None
+    best_owner = (None, None)
     for owned_path, owner in index.items():
         if norm.startswith(owned_path + os.sep):
-            return owner
-    return (None, None)
+            if best_path is None or len(owned_path) > len(best_path):
+                best_path = owned_path
+                best_owner = owner
+    return best_owner
 
 
 def _size_of(item):
