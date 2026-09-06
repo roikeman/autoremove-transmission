@@ -401,6 +401,60 @@ def test_plan_and_execute_reuse_cache_without_rescanning(client, monkeypatch):
     assert _CountingJellyfin.calls == calls_after_scan  # execute reused the cache too
 
 
+def test_candidates_malformed_cache_entry_falls_back_to_scan(client, monkeypatch):
+    """A cache written by an older version -- missing a field on a
+    candidate entry, e.g. owner_id -- must degrade to a fresh scan (200),
+    not raise a KeyError that surfaces as a 502."""
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+
+    os.makedirs(os.path.dirname(app_module._candidates_cache_path()), exist_ok=True)
+    with open(app_module._candidates_cache_path(), "w") as f:
+        json.dump({
+            "candidates": [{
+                "jf_id": "m1", "kind": "movie", "title": "Old Movie",
+                "path": "/x/old-movie.mkv", "size_bytes": 12345,
+                "added": "2015-01-01T00:00:00", "last_played": "2015-06-01T00:00:00",
+                "episodes": 1, "watched": 1, "progress_pct": 100.0,
+                "owner": None,
+                # "owner_id" deliberately missing -- simulates an older cache format.
+                "bucket": "A", "flags": [],
+            }],
+            "age_days": 30, "idle_days": 14, "scanned_at": "2026-01-01T00:00:00",
+        }, f)
+
+    resp = client.get("/api/library/candidates?age_days=30&idle_days=14")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["cached"] is False
+    assert _CountingJellyfin.calls > 0
+
+
+def test_plan_uses_cache_even_when_thresholds_differ_from_config_defaults(client, monkeypatch):
+    """The user viewed candidates with custom age/idle overrides (cached
+    thresholds != config defaults). /plan must still use that cache rather
+    than force a fresh (multi-minute) Jellyfin scan just because the
+    cached thresholds don't match cfg_mod.load()'s defaults."""
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+
+    # Warm the cache with thresholds that differ from the config defaults.
+    warm = client.get("/api/library/candidates?age_days=999&idle_days=999")
+    assert warm.status_code == 200
+    assert warm.get_json()["cached"] is False
+    calls_after_scan = _CountingJellyfin.calls
+    assert calls_after_scan > 0
+
+    import config
+    cfg = config.load()
+    assert cfg["age_days"] != 999
+    assert cfg["idle_days"] != 999
+
+    plan_resp = client.post("/api/library/plan", json={"jf_ids": ["m1"]})
+    assert plan_resp.status_code == 200
+    # The Jellyfin client was not hit again -- plan reused the mismatched-
+    # threshold cache instead of rescanning.
+    assert _CountingJellyfin.calls == calls_after_scan
+
+
 def test_cache_cleared_after_successful_execute(client, monkeypatch):
     app_module = _setup_counting_jellyfin(client, monkeypatch)
     monkeypatch.setattr(

@@ -184,25 +184,77 @@ def _clear_candidates_cache():
 
 def _candidate_from_cached_dict(d):
     """Reconstruct a Candidate from one Candidate.to_dict() entry as stored
-    in the cache file. added/last_played round-tripped through to_dict()
-    into ISO strings (or null), so cand.parse_dt -- the same parser used
-    for Jellyfin's own timestamps -- turns them back into datetimes."""
+    in the cache file. Validates each field defensively: an older cache
+    written before a field existed (missing key), or any field with an
+    unexpected type, raises KeyError/TypeError so the caller can treat the
+    whole cache as unusable and fall back to a fresh scan -- instead of
+    surfacing a 502, or letting a wrong-typed field (e.g. size_bytes as a
+    string) blow up later when candidates are sorted or summed.
+
+    added/last_played round-tripped through to_dict() into ISO strings (or
+    null), so cand.parse_dt -- the same parser used for Jellyfin's own
+    timestamps -- turns them back into datetimes.
+    """
+    def _str(key):
+        v = d[key]
+        if not isinstance(v, str):
+            raise TypeError(f"{key} must be a string")
+        return v
+
+    def _opt_str(key):
+        v = d[key]
+        if v is not None and not isinstance(v, str):
+            raise TypeError(f"{key} must be a string or null")
+        return v
+
+    def _int(key):
+        v = d[key]
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise TypeError(f"{key} must be an int")
+        return v
+
+    def _opt_int(key):
+        v = d[key]
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
+            raise TypeError(f"{key} must be an int or null")
+        return v
+
+    def _num(key):
+        v = d[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise TypeError(f"{key} must be a number")
+        return v
+
+    flags = d.get("flags") or []
+    if not isinstance(flags, list):
+        raise TypeError("flags must be a list")
+
     return cand.Candidate(
-        jf_id=d["jf_id"],
-        kind=d["kind"],
-        title=d["title"],
-        path=d["path"],
-        size_bytes=d["size_bytes"],
+        jf_id=_str("jf_id"),
+        kind=_str("kind"),
+        title=_str("title"),
+        path=_str("path"),
+        size_bytes=_int("size_bytes"),
         added=cand.parse_dt(d["added"]),
         last_played=cand.parse_dt(d["last_played"]),
-        episodes=d["episodes"],
-        watched=d["watched"],
-        progress_pct=d["progress_pct"],
-        owner=d["owner"],
-        owner_id=d["owner_id"],
-        bucket=d["bucket"],
-        flags=list(d.get("flags") or []),
+        episodes=_int("episodes"),
+        watched=_int("watched"),
+        progress_pct=_num("progress_pct"),
+        owner=_opt_str("owner"),
+        owner_id=_opt_int("owner_id"),
+        bucket=_str("bucket"),
+        flags=list(flags),
     )
+
+
+def _reconstruct_cached_candidates(cached):
+    """Rebuild every Candidate from a loaded cache dict's "candidates" list.
+    Returns None (never raises) if any entry is malformed, so callers can
+    treat that the same as "no cache" rather than a 502."""
+    try:
+        return [_candidate_from_cached_dict(d) for d in cached["candidates"]]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _scan_with_cache(cfg, force_refresh=False):
@@ -223,8 +275,9 @@ def _scan_with_cache(cfg, force_refresh=False):
     if not force_refresh:
         cached = _load_candidates_cache()
         if cached is not None and cached["age_days"] == age and cached["idle_days"] == idle:
-            candidates = [_candidate_from_cached_dict(d) for d in cached["candidates"]]
-            return candidates, {"cached": True, "scanned_at": cached["scanned_at"]}
+            candidates = _reconstruct_cached_candidates(cached)
+            if candidates is not None:
+                return candidates, {"cached": True, "scanned_at": cached["scanned_at"]}
 
     found = _scan(cfg)
     scanned_at = datetime.now().isoformat()
@@ -564,8 +617,25 @@ def _selected(cfg, jf_ids):
     # and confirming. This is safe because the pipeline is already
     # idempotent: a title deleted in the meantime returns 404 from
     # Sonarr/Radarr (treated as success) and a missing path frees 0 bytes.
+    #
+    # Unlike _scan_with_cache (used by GET /candidates), this deliberately
+    # does NOT require the cache's age_days/idle_days to match cfg's
+    # current defaults: cfg here is cfg_mod.load(), which never carries the
+    # per-request query-param overrides GET /candidates applied. Requiring
+    # a threshold match would force /plan and /execute back into a full
+    # synchronous rescan every time the user reviewed candidates with
+    # custom thresholds -- reintroducing the multi-minute timeout this
+    # cache exists to eliminate, on the two POST endpoints where it hurts
+    # most. The plan->execute selection guard (comparing jf_ids against the
+    # persisted last plan) and pipeline.execute's own blast-radius check
+    # still pin what actually gets deleted, independent of this choice.
     wanted = set(jf_ids)
-    found, _meta = _scan_with_cache(cfg)
+
+    cached = _load_candidates_cache()
+    found = _reconstruct_cached_candidates(cached) if cached is not None else None
+    if found is None:
+        found, _meta = _scan_with_cache(cfg)
+
     return [c for c in found if c.jf_id in wanted]
 
 
