@@ -111,14 +111,35 @@ def _size_of(item):
 def from_series(item, owner_index, episodes=None, watched=None):
     user = item.get("UserData") or {}
     total = episodes if episodes is not None else int(item.get("RecursiveItemCount") or 0)
+
+    # "UnplayedItemCount" absent from the payload is NOT the same as "0
+    # unplayed episodes" -- nobody has confirmed Jellyfin always sends this
+    # field. When it's missing (and no caller passed an explicit `watched`,
+    # e.g. via the per-episode-query fallback), the watched count is
+    # UNKNOWN and must not be inferred as "fully watched".
+    watched_unknown = False
     if watched is None:
-        unplayed = int(user.get("UnplayedItemCount") or 0)
-        watched = max(total - unplayed, 0)
+        if "UnplayedItemCount" in user:
+            unplayed = int(user.get("UnplayedItemCount") or 0)
+            watched = max(total - unplayed, 0)
+        else:
+            watched_unknown = True
+            watched = 0
 
     added = parse_dt(item.get("DateLastMediaAdded")) or parse_dt(item.get("DateCreated"))
     last_played = parse_dt(user.get("LastPlayedDate"))
     path = item.get("Path") or ""
     owner, owner_id = match_owner(path, owner_index)
+
+    bucket = buckets.classify("series", total, watched, last_played, 0.0)
+    flags = buckets.quality_flags(added, last_played, False)
+    if watched_unknown:
+        flags.append("watch-count-unavailable")
+        # Never let an unknown watched count land in a pre-ticked bucket --
+        # unless it's legitimately "A" (no play event at all: last_played is
+        # None), which doesn't depend on the watched count being accurate.
+        if bucket in buckets.PRETICKED and bucket != buckets.NEVER_OPENED:
+            bucket = buckets.MID_WATCH
 
     return Candidate(
         jf_id=item.get("Id"),
@@ -133,8 +154,8 @@ def from_series(item, owner_index, episodes=None, watched=None):
         progress_pct=0.0,
         owner=owner,
         owner_id=owner_id,
-        bucket=buckets.classify("series", total, watched, last_played, 0.0),
-        flags=buckets.quality_flags(added, last_played, False),
+        bucket=bucket,
+        flags=flags,
     )
 
 

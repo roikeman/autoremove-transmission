@@ -178,6 +178,48 @@ def test_execute_writes_journal_entry():
     assert title_entries[0]["title"] == "Show"
 
 
+def test_execute_journals_each_destructive_step_immediately():
+    # A hard process death between the owner delete and the Jellyfin delete
+    # must still leave a record that the owner delete happened. Each
+    # destructive step is journaled as it completes, not only at title
+    # completion.
+    pipeline.execute([_candidate()], CFG, _clients())
+    entries = journal.read_recent()
+    step_entries = [e for e in entries if e.get("kind") == "step"]
+
+    assert any(e["step"].startswith("sonarr:delete/") and e["status"] == "ok"
+               for e in step_entries)
+    assert any(e["step"].startswith("jellyfin:delete/") and e["status"] == "ok"
+               for e in step_entries)
+    assert all(e["title"] == "Show" for e in step_entries)
+
+
+def test_execute_step_journal_survives_jellyfin_failure():
+    # Even when the Jellyfin step fails (title ends up "partial"), the
+    # owner-delete step -- which already succeeded and already deleted
+    # real data -- must have its own journal record.
+    class Boom(FakeJellyfin):
+        def delete_item(self, item_id):
+            raise RuntimeError("jellyfin down")
+
+    clients = _clients(jellyfin=Boom())
+    pipeline.execute([_candidate()], CFG, clients)
+    entries = journal.read_recent()
+    step_entries = [e for e in entries if e.get("kind") == "step"]
+
+    assert any(e["step"].startswith("sonarr:delete/") and e["status"] == "ok"
+               for e in step_entries)
+    assert not any(e["step"].startswith("jellyfin:delete/") for e in step_entries)
+
+
+def test_title_completion_journal_entry_is_kind_title():
+    pipeline.execute([_candidate()], CFG, _clients())
+    entries = journal.read_recent()
+    title_entries = [e for e in entries if e.get("kind") == "title"]
+    assert title_entries[0]["title"] == "Show"
+    assert title_entries[0]["status"] == "deleted"
+
+
 def test_execute_continues_after_one_title_fails():
     class BoomOnce(FakeArr):
         def delete_item(self, item_id):
@@ -227,6 +269,29 @@ def test_seed_guard_mode2_always_keeps_regardless_of_limit():
     assert pipeline.should_keep_seeding(torrent, session_ratio_limit=0.1) is True
 
 
+def test_seed_guard_keeps_torrent_below_minimum_seed_time():
+    # Ratio is already satisfied (mode 1, ratio 5.0 >= limit 1.0), but the
+    # torrent has only been seeding 100s against a 3600s minimum -- must
+    # still be kept.
+    torrent = {"uploadRatio": 5.0, "seedRatioLimit": 1.0, "seedRatioMode": 1,
+               "secondsSeeding": 100}
+    assert pipeline.should_keep_seeding(torrent, min_seed_seconds=3600) is True
+
+
+def test_seed_guard_releases_torrent_above_minimum_seed_time_and_ratio_met():
+    torrent = {"uploadRatio": 5.0, "seedRatioLimit": 1.0, "seedRatioMode": 1,
+               "secondsSeeding": 7200}
+    assert pipeline.should_keep_seeding(torrent, min_seed_seconds=3600) is False
+
+
+def test_seed_guard_minimum_seed_time_disabled_when_zero():
+    # min_seed_seconds=0 (the falsy default) must not affect the outcome --
+    # only the pre-existing ratio logic applies.
+    torrent = {"uploadRatio": 5.0, "seedRatioLimit": 1.0, "seedRatioMode": 1,
+               "secondsSeeding": 0}
+    assert pipeline.should_keep_seeding(torrent, min_seed_seconds=0) is False
+
+
 def test_execute_fetches_session_limit_once_for_mode0_seed_guard(tmp_path):
     lib_dir = tmp_path / "share" / "Show"
     lib_dir.mkdir(parents=True)
@@ -246,6 +311,32 @@ def test_execute_fetches_session_limit_once_for_mode0_seed_guard(tmp_path):
     pipeline.execute([_candidate(owner=None, owner_id=None, path=str(lib_dir))], cfg, clients)
 
     # ratio 0.1 < session limit 2.0 -> kept, not removed.
+    assert tm.removed == []
+
+
+def test_execute_wires_min_seed_seconds_into_sweep(tmp_path):
+    lib_dir = tmp_path / "share" / "Show"
+    lib_dir.mkdir(parents=True)
+    lib_file = lib_dir / "ep.mkv"
+    lib_file.write_bytes(b"x")
+
+    dl_dir = tmp_path / "downloads" / "Show"
+    dl_dir.mkdir(parents=True)
+    os.link(str(lib_file), str(dl_dir / "ep.mkv"))
+
+    # Ratio is already satisfied (mode 1, ratio 5.0 >= limit 1.0) -- were
+    # min_seed_seconds not wired through from cfg into the sweep, this
+    # torrent would be removed.
+    torrent = {"id": 9, "downloadDir": str(dl_dir), "files": [{"name": "ep.mkv"}],
+               "seedRatioMode": 1, "seedRatioLimit": 1.0, "uploadRatio": 5.0,
+               "secondsSeeding": 100}
+    tm = FakeTransmission(torrents=[torrent])
+    clients = _clients(transmission=tm)
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")], "seed_guard": True,
+           "min_seed_seconds": 3600}
+
+    pipeline.execute([_candidate(owner=None, owner_id=None, path=str(lib_dir))], cfg, clients)
+
     assert tm.removed == []
 
 

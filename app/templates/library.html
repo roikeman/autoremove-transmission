@@ -335,7 +335,6 @@ let _sectionOpen = { A: true, B: true, C1: true, C2: true, C3: false };
 
 let _lastPlanIds    = null; // Set of jf_ids the last successful /plan call covered
 let _lastPlanResult = null; // the /plan response body
-let _executeArmed   = false;
 let _executing      = false;
 let _modal          = null;
 let _journalOpen     = false;
@@ -660,7 +659,6 @@ async function runPreflight() {
     if (resp.ok) {
       _lastPlanIds = requestedIds;
       _lastPlanResult = data;
-      _executeArmed = false;
       openPlanModal(data);
       updateSummary();
     } else {
@@ -734,7 +732,6 @@ async function executeDelete() {
       renderResults(data.results || []);
       _lastPlanIds = null;
       _lastPlanResult = null;
-      _executeArmed = false;
       _modal.hide();
       // Refresh the list so deleted/changed titles drop out of the buckets.
       await loadCandidates();
@@ -742,19 +739,15 @@ async function executeDelete() {
     }
 
     if (resp.status === 409 && data.blast_radius) {
-      if (!_executeArmed) {
-        _executeArmed = true;
-        errEl.textContent = data.error + "\n\nClick Delete permanently again to retry.";
-        errEl.style.display = "block";
-        btn.disabled = false;
-        setIconLabel(btn, "bi bi-trash3", "Confirm & delete anyway");
-      } else {
-        // Second explicit click: surface whatever the server says this time,
-        // verbatim, without silently looping.
-        errEl.textContent = data.error;
-        errEl.style.display = "block";
-        btn.disabled = false;
-      }
+      // There is no override for the blast-radius cap -- it exists to bound
+      // a mistake. Surface the server's error and send the user back to
+      // Preflight; a second click here can never succeed differently.
+      errEl.textContent = (data.error || "Selection exceeds the configured limits") +
+        "\n\nReduce your selection, or raise the cap in Settings, then re-run Preflight.";
+      errEl.style.display = "block";
+      btn.disabled = true;
+      _lastPlanIds = null;
+      _lastPlanResult = null;
       return;
     }
 
@@ -849,13 +842,26 @@ function buildJournalEntry(entry) {
   const ts = el("div", { className: "journal-ts", text: entry.ts || "" });
   row.appendChild(ts);
 
-  // Not every journal entry describes a title -- the Transmission sweep
-  // writes its own summary entry with no "title" key.
-  if (!("title" in entry)) {
+  // Not every journal entry describes a completed title. The Transmission
+  // sweep writes its own summary entry (kind: "transmission_sweep", no
+  // "title" key), and each destructive step now also writes its own
+  // immediate record (kind: "step") in addition to the title-completion
+  // entry (kind: "title") -- so a mid-title crash still leaves a trace.
+  if (entry.kind === "transmission_sweep" || !("title" in entry)) {
     const detail = entry.status === "error"
       ? `Transmission sweep failed: ${entry.detail || ""}`
       : `Transmission sweep — removed ${entry.removed || 0}, kept ${entry.kept || 0} (still seeding)`;
     row.appendChild(el("div", { text: detail }));
+    return row;
+  }
+
+  if (entry.kind === "step") {
+    const isError = entry.status && entry.status !== "ok";
+    row.appendChild(el("div", {
+      className: "step-line" + (isError ? " step-error" : ""),
+      text: `${entry.title || ""} — ${entry.step}: ${entry.status}` +
+            (entry.detail ? ` (${entry.detail})` : "")
+    }));
     return row;
   }
 

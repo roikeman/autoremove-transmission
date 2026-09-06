@@ -22,6 +22,7 @@ DEFAULTS = {
     "age_days":              180,
     "idle_days":             90,
     "seed_guard":            True,
+    "min_seed_seconds":      86400,
     "max_titles_per_run":    50,
     "max_bytes_per_run":     1099511627776,
     "library_roots":         ["/share"],
@@ -40,7 +41,7 @@ ENV_OVERRIDES = {
     "radarr_api_key":   "RADARR_API_KEY",
 }
 
-_INT_KEYS = {"age_days", "idle_days", "max_titles_per_run", "max_bytes_per_run"}
+_INT_KEYS = {"age_days", "idle_days", "min_seed_seconds", "max_titles_per_run", "max_bytes_per_run"}
 
 _lock = threading.Lock()
 

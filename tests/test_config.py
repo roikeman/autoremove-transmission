@@ -16,6 +16,7 @@ def test_defaults_include_new_services(tmp_path, monkeypatch):
     assert cfg["age_days"] == 180
     assert cfg["idle_days"] == 90
     assert cfg["seed_guard"] is True
+    assert cfg["min_seed_seconds"] == 86400
     assert cfg["jellyfin_url"] == ""
     assert cfg["library_roots"] == ["/share"]
 

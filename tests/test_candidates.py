@@ -1,6 +1,7 @@
 from datetime import datetime
 import pytest
 from cleanup import candidates as C
+from cleanup import buckets
 
 NOW = datetime(2026, 9, 6)
 
@@ -151,6 +152,45 @@ def test_from_series_flags_unreliable_added_date():
                   "UnplayedItemCount": 0},
     ), {})
     assert "added-date-unreliable" in c.flags
+
+
+def test_from_series_missing_unplayed_count_with_play_event_is_not_preticked():
+    # Jellyfin omitted UnplayedItemCount entirely (not confirmed to never
+    # happen). There IS a play event, so this must not be silently treated
+    # as "0 unplayed" -- that would make an unwatched series compute as
+    # fully watched and land pre-ticked for deletion.
+    item = _series_item(
+        UserData={"Played": False,
+                   "LastPlayedDate": "2026-01-01T00:00:00.0000000Z"},
+    )
+    c = C.from_series(item, {})
+    assert c.bucket not in buckets.PRETICKED
+    assert "watch-count-unavailable" in c.flags
+
+
+def test_from_series_explicit_zero_unplayed_count_is_still_fully_watched():
+    # The companion case: UnplayedItemCount IS present and explicitly 0 --
+    # this is a real signal, not an absent field, and must still classify
+    # as fully watched (bucket B), not be treated as unknown.
+    item = _series_item(
+        UserData={"Played": False,
+                   "LastPlayedDate": "2026-01-01T00:00:00.0000000Z",
+                   "UnplayedItemCount": 0},
+    )
+    c = C.from_series(item, {})
+    assert c.bucket == "B"
+    assert "watch-count-unavailable" not in c.flags
+
+
+def test_from_series_explicit_watched_argument_bypasses_unknown_path():
+    # The documented per-episode-query fallback: caller already knows the
+    # watched count, so it must not be treated as unknown even though
+    # UnplayedItemCount is absent from the payload.
+    item = _series_item(UserData={"Played": False, "LastPlayedDate": None})
+    c = C.from_series(item, {}, watched=10)
+    assert c.watched == 10
+    assert c.bucket == "B"
+    assert "watch-count-unavailable" not in c.flags
 
 
 def _movie_item(**over):

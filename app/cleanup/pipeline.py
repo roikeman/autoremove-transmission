@@ -25,17 +25,27 @@ _MODE_PER_TORRENT = 1
 _MODE_UNLIMITED = 2
 
 
-def should_keep_seeding(torrent, session_ratio_limit=None):
-    """True when the torrent has not met its seed ratio and must be kept.
+def should_keep_seeding(torrent, session_ratio_limit=None, min_seed_seconds=0):
+    """True when the torrent has not met its seed ratio OR its minimum seed
+    time and must be kept.
 
     `session_ratio_limit` is the session's global seedRatioLimit, resolved
     once by the caller (session-get RPC) and passed in so this function
     stays a pure, unit-testable predicate. Pass None when the session limit
     is unknown or disabled (mode 0 then has no target, so the torrent may
     be swept).
+
+    `min_seed_seconds` is a simple, configured floor on `secondsSeeding`
+    (already fetched by clients/transmission.py, previously unused). This
+    is deliberately NOT a full emulation of Transmission's per-torrent
+    seedIdleMode/seedIdleLimit semantics -- just one extra, always-applied
+    minimum. Pass 0 (the falsy default) to disable it.
     """
     mode = torrent.get("seedRatioMode", _MODE_GLOBAL)
     if mode == _MODE_UNLIMITED:
+        return True
+
+    if min_seed_seconds and float(torrent.get("secondsSeeding") or 0) < min_seed_seconds:
         return True
 
     if mode == _MODE_PER_TORRENT:
@@ -175,6 +185,28 @@ def execute(candidates, cfg, clients):
     return results
 
 
+def _journal_step(candidate, step):
+    """Journal one destructive step immediately, independent of the
+    per-title completion entry written by _finish().
+
+    A hard process death (OOM kill, power loss) between two successful
+    destructive steps -- e.g. after the Sonarr/Radarr delete but before the
+    Jellyfin delete -- would otherwise leave no record that anything
+    happened at all, even though files are already gone. `kind: "step"`
+    keeps these distinguishable from the title-completion (`kind: "title"`)
+    and sweep (`kind: "transmission_sweep"`) entries for read_recent
+    consumers and the UI.
+    """
+    journal.append({
+        "kind": "step",
+        "jf_id": candidate.jf_id,
+        "title": candidate.title,
+        "step": step["step"],
+        "status": step["status"],
+        "detail": step["detail"],
+    })
+
+
 def _execute_one(candidate, cfg, clients):
     steps = []
     freed = 0
@@ -188,13 +220,15 @@ def _execute_one(candidate, cfg, clients):
     try:
         if candidate.owner == "sonarr":
             clients.sonarr.delete_item(candidate.owner_id)
-            steps.append({"step": f"sonarr:delete/{candidate.owner_id}", "status": "ok", "detail": ""})
+            step = {"step": f"sonarr:delete/{candidate.owner_id}", "status": "ok", "detail": ""}
         elif candidate.owner == "radarr":
             clients.radarr.delete_item(candidate.owner_id)
-            steps.append({"step": f"radarr:delete/{candidate.owner_id}", "status": "ok", "detail": ""})
+            step = {"step": f"radarr:delete/{candidate.owner_id}", "status": "ok", "detail": ""}
         else:
             freed += _delete_tree(candidate.path, cfg.get("library_roots") or [])
-            steps.append({"step": "files:delete", "status": "ok", "detail": str(freed)})
+            step = {"step": "files:delete", "status": "ok", "detail": str(freed)}
+        steps.append(step)
+        _journal_step(candidate, step)
     except Exception as exc:
         steps.append({"step": "owner:delete", "status": "error", "detail": str(exc)})
         return _finish(candidate, "failed", steps, freed), inode_keys
@@ -206,7 +240,9 @@ def _execute_one(candidate, cfg, clients):
     status = "deleted"
     try:
         clients.jellyfin.delete_item(candidate.jf_id)
-        steps.append({"step": f"jellyfin:delete/{candidate.jf_id}", "status": "ok", "detail": ""})
+        step = {"step": f"jellyfin:delete/{candidate.jf_id}", "status": "ok", "detail": ""}
+        steps.append(step)
+        _journal_step(candidate, step)
     except Exception as exc:
         steps.append({"step": "jellyfin:delete", "status": "error", "detail": str(exc)})
         status = "partial"
@@ -272,13 +308,14 @@ def _sweep_torrents(cfg, clients, inode_keys):
     removed = 0
     kept = 0
     session_limit = _session_ratio_limit(clients) if cfg.get("seed_guard") else None
+    min_seed_seconds = int(cfg.get("min_seed_seconds") or 0)
 
     for torrent in clients.transmission.get_all_torrents():
         if not clients.transmission.is_deletable(torrent):
             continue
         if not (inode_keys & _torrent_inode_keys(torrent)):
             continue
-        if cfg.get("seed_guard") and should_keep_seeding(torrent, session_limit):
+        if cfg.get("seed_guard") and should_keep_seeding(torrent, session_limit, min_seed_seconds):
             kept += 1
             continue
         clients.transmission.remove_torrent(torrent["id"], delete_data=True)
@@ -307,5 +344,5 @@ def _finish(candidate, status, steps, freed):
         "steps": steps,
         "bytes_freed": freed,
     }
-    journal.append(dict(result))
+    journal.append({"kind": "title", **result})
     return result
