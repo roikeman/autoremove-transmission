@@ -23,4 +23,10 @@ RUN mkdir -p /config
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "60", "app:app"]
+# --timeout is generous (1800s) because a real cleanup run can delete
+# hundreds of titles across terabytes and take many minutes; gunicorn
+# kills any worker whose request exceeds this timeout, which would abort
+# an in-progress deletion run and leave it half-completed with no
+# response to the client. Do NOT trim this back down without confirming
+# the largest expected run comfortably fits inside it.
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "1800", "app:app"]

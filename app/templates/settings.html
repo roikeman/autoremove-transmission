@@ -69,6 +69,7 @@
     }
     input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,106,247,.18); }
     input::placeholder { color: var(--text-muted); }
+    input[readonly] { opacity: .6; cursor: not-allowed; }
 
     .btn-test {
       background: rgba(91,141,238,.12); border: 1px solid rgba(91,141,238,.3); color: #7aabf5;
@@ -100,6 +101,19 @@
     .conn-ok  { background: #50c878; box-shadow: 0 0 6px rgba(80,200,120,.6); }
     .conn-err { background: #e05c5c; box-shadow: 0 0 6px rgba(224,92,92,.6); }
     .conn-idle{ background: rgba(255,255,255,.2); }
+
+    input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+    .checkbox-row { display: flex; align-items: center; gap: .6rem; cursor: pointer; font-size: .85rem; }
+    .env-note {
+      font-size: .74rem; color: var(--warn, #f0a060); margin-top: .1rem;
+      display: none; align-items: center; gap: .35rem;
+    }
+    textarea.field-textarea {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .55rem .85rem; font-size: .83rem; width: 100%;
+      resize: vertical; outline: none; font-family: monospace;
+      transition: border-color .15s, box-shadow .15s;
+    }
   </style>
 </head>
 <body>
@@ -161,6 +175,87 @@
     </div>
   </div>
 
+  <!-- Jellyfin -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-play-circle"></i> Jellyfin</div>
+    <div class="settings-card-body">
+      <div class="field-group">
+        <label class="field-label">URL</label>
+        <input type="text" id="jellyfin_url" placeholder="http://192.168.1.170:8096">
+      </div>
+      <div class="field-group">
+        <label class="field-label">API Key</label>
+        <input type="password" id="jellyfin_api_key" placeholder="API key" autocomplete="off">
+        <span class="field-desc env-note" id="jellyfin_api_key_note">
+          <i class="bi bi-lock-fill"></i> Set by environment
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.75rem;margin-top:.25rem">
+        <button class="btn-test" id="jellyfinTestBtn" onclick="testServiceConnection('jellyfin')">
+          <i class="bi bi-plug" id="jellyfinTestIcon"></i> Test connection
+        </button>
+        <span style="font-size:.83rem;color:var(--text-muted);display:flex;align-items:center">
+          <span class="conn-dot conn-idle" id="jellyfinConnDot"></span>
+          <span id="jellyfinConnText">Not tested</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sonarr -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-tv"></i> Sonarr</div>
+    <div class="settings-card-body">
+      <div class="field-group">
+        <label class="field-label">URL</label>
+        <input type="text" id="sonarr_url" placeholder="http://192.168.1.132:8989">
+      </div>
+      <div class="field-group">
+        <label class="field-label">API Key</label>
+        <input type="password" id="sonarr_api_key" placeholder="API key" autocomplete="off">
+        <span class="field-desc env-note" id="sonarr_api_key_note">
+          <i class="bi bi-lock-fill"></i> Set by environment
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.75rem;margin-top:.25rem">
+        <button class="btn-test" id="sonarrTestBtn" onclick="testServiceConnection('sonarr')">
+          <i class="bi bi-plug" id="sonarrTestIcon"></i> Test connection
+        </button>
+        <span style="font-size:.83rem;color:var(--text-muted);display:flex;align-items:center">
+          <span class="conn-dot conn-idle" id="sonarrConnDot"></span>
+          <span id="sonarrConnText">Not tested</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Radarr -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-film"></i> Radarr</div>
+    <div class="settings-card-body">
+      <div class="field-group">
+        <label class="field-label">URL</label>
+        <input type="text" id="radarr_url" placeholder="http://192.168.1.132:7878">
+      </div>
+      <div class="field-group">
+        <label class="field-label">API Key</label>
+        <input type="password" id="radarr_api_key" placeholder="API key" autocomplete="off">
+        <span class="field-desc env-note" id="radarr_api_key_note">
+          <i class="bi bi-lock-fill"></i> Set by environment
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.75rem;margin-top:.25rem">
+        <button class="btn-test" id="radarrTestBtn" onclick="testServiceConnection('radarr')">
+          <i class="bi bi-plug" id="radarrTestIcon"></i> Test connection
+        </button>
+        <span style="font-size:.83rem;color:var(--text-muted);display:flex;align-items:center">
+          <span class="conn-dot conn-idle" id="radarrConnDot"></span>
+          <span id="radarrConnText">Not tested</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
   <!-- Exclude paths -->
   <div class="settings-card">
     <div class="settings-card-header"><i class="bi bi-folder-x"></i> Exclude Paths (orphan scan)</div>
@@ -172,6 +267,54 @@
           onfocus="this.style.borderColor='var(--accent)';this.style.boxShadow='0 0 0 3px rgba(124,106,247,.18)'"
           onblur="this.style.borderColor='';this.style.boxShadow=''"></textarea>
         <span class="field-desc">One path per line. These directories and their contents will be skipped during the orphan file scan.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Library cleanup -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-sliders"></i> Library Cleanup</div>
+    <div class="settings-card-body">
+      <div class="field-row">
+        <div class="field-group">
+          <label class="field-label">Age (days)</label>
+          <input type="number" id="age_days" min="0" placeholder="180">
+        </div>
+        <div class="field-group">
+          <label class="field-label">Idle (days)</label>
+          <input type="number" id="idle_days" min="0" placeholder="90">
+        </div>
+      </div>
+      <span class="field-desc">A title is a candidate once it has been in the library longer than the age, and (if ever played) has sat idle longer than the idle window.</span>
+      <div class="field-row">
+        <div class="field-group">
+          <label class="field-label">Max titles per run</label>
+          <input type="number" id="max_titles_per_run" min="0" placeholder="50">
+        </div>
+        <div class="field-group">
+          <label class="field-label">Max bytes per run</label>
+          <input type="number" id="max_bytes_per_run" min="0" placeholder="1099511627776">
+        </div>
+      </div>
+      <span class="field-desc">A run that exceeds either cap is refused rather than partially executed.</span>
+      <div class="field-group">
+        <label class="checkbox-row">
+          <input type="checkbox" id="seed_guard">
+          Seed guard — keep torrents still seeding under their ratio limit or minimum seed time
+        </label>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Minimum seed time (seconds)</label>
+        <input type="number" id="min_seed_seconds" min="0" placeholder="86400">
+        <span class="field-desc">A torrent seeding for less than this is kept even if its ratio limit is already met. 0 disables this check.</span>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Library roots</label>
+        <textarea id="library_roots" rows="4" placeholder="/share/Movies&#10;/share/TV"
+          style="background:var(--surface2);border:1px solid var(--border);color:#e8e8f0;border-radius:8px;padding:.55rem .85rem;font-size:.83rem;width:100%;resize:vertical;outline:none;font-family:monospace;transition:border-color .15s,box-shadow .15s"
+          onfocus="this.style.borderColor='var(--accent)';this.style.boxShadow='0 0 0 3px rgba(124,106,247,.18)'"
+          onblur="this.style.borderColor='';this.style.boxShadow=''"></textarea>
+        <span class="field-desc">One path per line. Deletions are refused for any title whose path falls outside these roots.</span>
       </div>
     </div>
   </div>
@@ -194,6 +337,72 @@ async function loadSettings() {
   document.getElementById("user").value          = d.transmission_user     || "";
   document.getElementById("pass").value          = d.transmission_pass     || "";
   document.getElementById("exclude_paths").value = (d.exclude_paths || []).join("\n");
+
+  document.getElementById("jellyfin_url").value = d.jellyfin_url || "";
+  document.getElementById("sonarr_url").value   = d.sonarr_url   || "";
+  document.getElementById("radarr_url").value   = d.radarr_url   || "";
+  document.getElementById("jellyfin_api_key").value = d.jellyfin_api_key || "";
+  document.getElementById("sonarr_api_key").value   = d.sonarr_api_key   || "";
+  document.getElementById("radarr_api_key").value   = d.radarr_api_key   || "";
+
+  // Secret keys supplied by an environment variable can't be edited here --
+  // render them readonly with a visible note instead of pretending they're
+  // a normal, saveable field.
+  const envLocked = d.env_locked || [];
+  ["jellyfin", "sonarr", "radarr"].forEach(service => {
+    const key   = service + "_api_key";
+    const input = document.getElementById(key);
+    const note  = document.getElementById(key + "_note");
+    const locked = envLocked.includes(key);
+    input.readOnly = locked;
+    note.style.display = locked ? "flex" : "none";
+  });
+
+  document.getElementById("age_days").value           = d.age_days           ?? "";
+  document.getElementById("idle_days").value          = d.idle_days          ?? "";
+  document.getElementById("max_titles_per_run").value = d.max_titles_per_run ?? "";
+  document.getElementById("max_bytes_per_run").value  = d.max_bytes_per_run  ?? "";
+  document.getElementById("seed_guard").checked       = !!d.seed_guard;
+  document.getElementById("min_seed_seconds").value   = d.min_seed_seconds ?? "";
+  document.getElementById("library_roots").value      = (d.library_roots || []).join("\n");
+}
+
+async function testServiceConnection(service) {
+  const btn  = document.getElementById(service + "TestBtn");
+  const icon = document.getElementById(service + "TestIcon");
+  const dot  = document.getElementById(service + "ConnDot");
+  const text = document.getElementById(service + "ConnText");
+
+  btn.disabled = true;
+  icon.className = "bi bi-arrow-repeat spin";
+  dot.className  = "conn-dot conn-idle";
+  text.textContent = "Testing…";
+
+  try {
+    const resp = await fetch(`/api/test-connection/${service}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url:     document.getElementById(service + "_url").value.trim(),
+        api_key: document.getElementById(service + "_api_key").value,
+      }),
+    });
+    const d = await resp.json();
+    if (resp.ok && d.status === "ok") {
+      dot.className  = "conn-dot conn-ok";
+      text.textContent = d.detail;
+    } else {
+      // Surfaced verbatim -- no friendlier copy invented over the server's
+      // own error string.
+      throw new Error(d.error || `HTTP ${resp.status}`);
+    }
+  } catch (err) {
+    dot.className  = "conn-dot conn-err";
+    text.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    icon.className = "bi bi-plug";
+  }
 }
 
 async function testConnection() {
@@ -249,6 +458,22 @@ async function saveSettings() {
     transmission_user:     document.getElementById("user").value.trim(),
     transmission_pass:     document.getElementById("pass").value,
     exclude_paths:         document.getElementById("exclude_paths").value
+                             .split("\n").map(p => p.trim()).filter(p => p),
+
+    jellyfin_url:          document.getElementById("jellyfin_url").value.trim(),
+    jellyfin_api_key:      document.getElementById("jellyfin_api_key").value,
+    sonarr_url:            document.getElementById("sonarr_url").value.trim(),
+    sonarr_api_key:        document.getElementById("sonarr_api_key").value,
+    radarr_url:            document.getElementById("radarr_url").value.trim(),
+    radarr_api_key:        document.getElementById("radarr_api_key").value,
+
+    age_days:              document.getElementById("age_days").value.trim(),
+    idle_days:             document.getElementById("idle_days").value.trim(),
+    max_titles_per_run:    document.getElementById("max_titles_per_run").value.trim(),
+    max_bytes_per_run:     document.getElementById("max_bytes_per_run").value.trim(),
+    seed_guard:            document.getElementById("seed_guard").checked,
+    min_seed_seconds:      document.getElementById("min_seed_seconds").value.trim(),
+    library_roots:         document.getElementById("library_roots").value
                              .split("\n").map(p => p.trim()).filter(p => p),
   };
 
