@@ -2814,6 +2814,83 @@ git commit -m "chore: wire up CI tests, compose env, and docs"
 
 ---
 
+## Task 16: Live verification on the deployment host
+
+The stack under test runs on `192.168.1.132` (`debian-cosmos`, `ssh froike@`),
+where the container `autoremove-transmission` is deployed. The repository owner
+has authorised updating that container to verify the finished feature.
+
+Do this only after Tasks 1-15 are complete and `pytest` is green. This is
+verification against live data — **the deletions it performs are real.**
+
+**Files:** none — deployment only.
+
+- [ ] **Step 1: Capture the current container configuration before changing it**
+
+```bash
+ssh froike@192.168.1.132 'docker inspect autoremove-transmission \
+  --format "IMAGE={{.Config.Image}} NET={{.HostConfig.NetworkMode}} RESTART={{.HostConfig.RestartPolicy.Name}}"; \
+  docker inspect autoremove-transmission --format "{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}"; \
+  docker port autoremove-transmission'
+```
+
+Record the output. The container must be recreated with exactly these mounts,
+network mode, and port bindings — do not assume the values in
+`docker-compose.yml` match what is actually deployed.
+
+- [ ] **Step 2: Build the image from the feature branch**
+
+Push the branch, let CI build it, then pull the tagged image:
+
+```bash
+ssh froike@192.168.1.132 'docker pull ghcr.io/roikeman/autoremove-transmission:<sha>'
+```
+
+Use the commit SHA tag, never `latest` — `latest` tracks `master` and would not
+contain the feature under test.
+
+- [ ] **Step 3: Recreate the container**
+
+Stop and remove the old container, then recreate it with the configuration
+captured in Step 1 and the image from Step 2. Keep the `/config` volume so the
+existing settings and journal survive.
+
+- [ ] **Step 4: Verify without deleting anything**
+
+```bash
+ssh froike@192.168.1.132 'curl -s localhost:5000/api/health'
+```
+
+Then in the browser: open the library page, confirm candidates load, confirm
+bucket counts and sizes are plausible against the figures in the spec
+(~1.23 TB across ~141 titles at the 180/90 defaults), and run **Preflight** on
+a small selection. **Stop there.** Preflight deletes nothing; confirm its
+reported steps and byte counts look right before anything is executed.
+
+- [ ] **Step 5: First real deletion — one low-risk title**
+
+Choose a single bucket A (never opened) title, execute, then verify:
+
+- the file is gone from `/share`
+- the entry is gone from Sonarr or Radarr
+- the entry is gone from Jellyfin
+- `/api/library/journal` records the run with all steps `ok`
+- the freed space appears in `df -h /media/magnetic-12tb` on `192.168.1.170`
+
+Only after this end-to-end confirmation should a larger selection be run.
+
+- [ ] **Step 6: Roll back if verification fails**
+
+```bash
+ssh froike@192.168.1.132 'docker stop autoremove-transmission && docker rm autoremove-transmission'
+```
+
+Recreate from the previously deployed image recorded in Step 1. Note that
+rolling back the container does **not** restore deleted media — there is no
+undo. That is why Step 5 uses exactly one title.
+
+---
+
 ## Self-Review Notes
 
 **Spec coverage:** every spec section maps to a task — selection criteria and buckets → Task 5; data-quality flags → Tasks 5 and 8; architecture and file structure → Tasks 2, 5–11; data model and `watched` derivation → Task 8; ownership matching → Task 8; API surface → Task 12; deletion pipeline and ordering → Task 11; seeding guard → Task 11; preflight → Tasks 11 and 12; blast radius → Task 11; failure handling and journal → Tasks 10 and 11; UI → Tasks 13 and 14; credentials → Tasks 4, 12, 14, 15; testing → every task; first implementation task → Task 3.
@@ -2821,3 +2898,8 @@ git commit -m "chore: wire up CI tests, compose env, and docs"
 **Known deviation:** `/api/library/retry` appears in the spec's API table but has no task. Retrying a partial title means re-running steps whose failure modes are already idempotent, so it is deferred rather than built blind — the journal records exactly what is needed to add it later. Raise this with the owner if per-step retry is considered required for the first release.
 
 **Type consistency:** `Candidate` field names are identical in Tasks 8, 11, and 12. Bucket strings are `"A"`, `"B"`, `"C1"`, `"C2"`, `"C3"` throughout. `Clients` field names (`sonarr`, `radarr`, `jellyfin`, `transmission`) match between Tasks 11 and 12. `pipeline.plan` and `pipeline.execute` take `(candidates, cfg)` and `(candidates, cfg, clients)` consistently.
+
+**Live verification:** Task 16 covers deployment to `192.168.1.132` for
+end-to-end verification, authorised by the repository owner. It is deliberately
+last and deliberately narrow — one bucket A title — because the pipeline it
+exercises has no undo.
