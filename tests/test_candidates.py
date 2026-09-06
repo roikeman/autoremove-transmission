@@ -182,6 +182,22 @@ def test_from_series_explicit_zero_unplayed_count_is_still_fully_watched():
     assert "watch-count-unavailable" not in c.flags
 
 
+def test_from_series_explicit_null_unplayed_count_is_not_preticked():
+    # Jellyfin sent the key with an explicit JSON null rather than omitting
+    # it. The key-presence check alone would treat this as "present", and
+    # int(None or 0) collapses to 0 -- silently reintroducing the "unwatched
+    # series looks fully watched" bug through a different door. An explicit
+    # null must be treated the same as an absent key: unknown.
+    item = _series_item(
+        UserData={"Played": False,
+                   "LastPlayedDate": "2026-01-01T00:00:00.0000000Z",
+                   "UnplayedItemCount": None},
+    )
+    c = C.from_series(item, {})
+    assert c.bucket not in buckets.PRETICKED
+    assert "watch-count-unavailable" in c.flags
+
+
 def test_from_series_explicit_watched_argument_bypasses_unknown_path():
     # The documented per-episode-query fallback: caller already knows the
     # watched count, so it must not be treated as unknown even though

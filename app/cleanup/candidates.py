@@ -119,7 +119,7 @@ def from_series(item, owner_index, episodes=None, watched=None):
     # UNKNOWN and must not be inferred as "fully watched".
     watched_unknown = False
     if watched is None:
-        if "UnplayedItemCount" in user:
+        if user.get("UnplayedItemCount") is not None:
             unplayed = int(user.get("UnplayedItemCount") or 0)
             watched = max(total - unplayed, 0)
         else:
