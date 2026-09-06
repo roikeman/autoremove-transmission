@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Library Cleanup — Transmission Cleaner</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c6af7'/%3E%3Cstop offset='1' stop-color='%235b8dee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M7 10h18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z' fill='none' stroke='white' stroke-width='1.8'/%3E%3Ccircle cx='22' cy='16' r='1.5' fill='white'/%3E%3Ccircle cx='18' cy='16' r='1.5' fill='rgba(255,255,255,0.5)'/%3E%3Cline x1='8' y1='13' x2='13' y2='13' stroke='rgba(255,255,255,0.6)' stroke-width='1.5' stroke-linecap='round'/%3E%3Cline x1='8' y1='16' x2='13' y2='16' stroke='rgba(255,255,255,0.4)' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    :root {
+      --bg:         #0d0d18;
+      --surface:    #16162a;
+      --surface2:   #1e1e35;
+      --border:     rgba(255,255,255,0.07);
+      --accent:     #7c6af7;
+      --accent2:    #5b8dee;
+      --danger:     #e05c5c;
+      --warn:       #f0a060;
+      --text-muted: rgba(255,255,255,0.45);
+    }
+    * { box-sizing: border-box; }
+    body { background: var(--bg); color: #e8e8f0; font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+
+    /* Header */
+    .app-header {
+      background: linear-gradient(135deg, #1a1040 0%, #0f1a30 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 2rem;
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    }
+    .app-title { display: flex; align-items: center; gap: .75rem; font-size: 1.15rem; font-weight: 600; letter-spacing: .01em; }
+    .app-title .icon-wrap {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center; font-size: 1rem;
+    }
+    .btn-back {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .45rem .9rem; font-size: .85rem;
+      display: flex; align-items: center; gap: .4rem; text-decoration: none;
+      transition: background .15s;
+    }
+    .btn-back:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+    /* Controls */
+    .controls-bar {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: .85rem 2rem; display: flex; align-items: flex-end; gap: 1.25rem; flex-wrap: wrap;
+    }
+    .control-group { display: flex; flex-direction: column; gap: .3rem; }
+    .control-group label { font-size: .72rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); }
+    .control-group input[type="number"] {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .45rem .7rem; font-size: .85rem; width: 110px;
+      outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    .control-group input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,106,247,.18); }
+
+    .btn-refresh {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .5rem .95rem; font-size: .85rem;
+      display: flex; align-items: center; gap: .4rem;
+      transition: background .15s, border-color .15s;
+    }
+    .btn-refresh:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); color: #fff; }
+    .btn-refresh:disabled { opacity: .5; pointer-events: none; }
+
+    .main-content { padding: 1.5rem 2rem; }
+
+    .alert-error {
+      background: rgba(224,92,92,.12); border: 1px solid rgba(224,92,92,.3); color: #f0a0a0;
+      border-radius: 10px; padding: .75rem 1.1rem; font-size: .88rem; margin-bottom: 1rem; display: none;
+      white-space: pre-wrap;
+    }
+    .alert-warn {
+      background: rgba(240,160,96,.1); border: 1px solid rgba(240,160,96,.28); color: var(--warn);
+      border-radius: 10px; padding: .6rem 1rem; font-size: .82rem; margin-top: .6rem; display: none;
+    }
+
+    /* Sticky summary bar */
+    .summary-bar {
+      position: sticky; top: 0; z-index: 6;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: .9rem 1.25rem; margin-bottom: 1.25rem;
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+    }
+    .summary-stats { display: flex; align-items: center; gap: 1.75rem; flex-wrap: wrap; }
+    .stat-item { display: flex; align-items: center; gap: .5rem; font-size: .85rem; }
+    .stat-value { font-weight: 600; font-size: .95rem; }
+    .stat-label { color: var(--text-muted); }
+    .plan-real-bytes { color: #a89df9; }
+    .badge-pill {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff; border-radius: 999px; padding: .2em .65em; font-size: .75rem; font-weight: 600;
+    }
+    .btn-preflight {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border: none; color: #fff; border-radius: 8px; padding: .55rem 1.3rem;
+      font-size: .88rem; font-weight: 600; cursor: pointer;
+      transition: opacity .15s, transform .1s;
+      display: flex; align-items: center; gap: .5rem;
+    }
+    .btn-preflight:hover { opacity: .9; transform: scale(1.01); }
+    .btn-preflight:disabled { opacity: .5; pointer-events: none; }
+
+    /* Bucket sections */
+    .bucket-section {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      overflow: hidden; margin-bottom: 1rem;
+    }
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: .85rem 1.25rem; cursor: pointer; user-select: none;
+      transition: background .15s;
+    }
+    .section-header:hover { background: rgba(255,255,255,.03); }
+    .section-title {
+      display: flex; align-items: center; gap: .6rem;
+      font-size: .82rem; font-weight: 600; color: #e8e8f0;
+    }
+    .section-title .bucket-count { color: var(--text-muted); font-weight: 500; font-size: .78rem; }
+    .section-chevron { transition: transform .25s ease; color: var(--text-muted); }
+    .section-open .section-chevron { transform: rotate(180deg); }
+    .section-body { display: none; border-top: 1px solid var(--border); }
+    .section-open .section-body { display: block; }
+
+    .table-scroll { max-height: 460px; overflow-y: auto; overflow-x: auto; }
+    .table-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+    .table-scroll::-webkit-scrollbar-track { background: transparent; }
+    .table-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+
+    table { margin: 0; border-collapse: collapse; width: 100%; min-width: 900px; }
+    thead th {
+      background: var(--surface2); color: var(--text-muted);
+      font-size: .7rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+      padding: .6rem 1rem; border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 1; white-space: nowrap;
+    }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(255,255,255,0.03); }
+    tbody td { padding: .7rem 1rem; vertical-align: middle; font-size: .85rem; }
+
+    .torrent-name { font-weight: 500; font-size: .88rem; line-height: 1.4; }
+    .torrent-path { font-size: .74rem; color: var(--text-muted); margin-top: .15rem; word-break: break-all; }
+    .size-badge {
+      background: rgba(124,106,247,.15); color: #a89df9;
+      border: 1px solid rgba(124,106,247,.25);
+      border-radius: 6px; padding: .25em .6em; font-size: .78rem; font-weight: 600; white-space: nowrap;
+    }
+    .date-text { font-size: .8rem; white-space: nowrap; }
+    .flag-chip {
+      display: inline-block; margin: .1rem .25rem .1rem 0;
+      background: rgba(240,160,96,.12); border: 1px solid rgba(240,160,96,.28);
+      color: var(--warn); border-radius: 5px; padding: .15em .5em; font-size: .7rem; white-space: nowrap;
+    }
+    .owner-chip {
+      display: inline-block; font-size: .74rem;
+      background: rgba(91,141,238,.12); border: 1px solid rgba(91,141,238,.2);
+      color: #7aabf5; border-radius: 5px; padding: .15em .5em;
+    }
+    .owner-none { color: var(--text-muted); font-size: .78rem; }
+    input.row-check, input.select-all-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+    .empty-state { padding: 2.5rem; text-align: center; color: var(--text-muted); font-size: .85rem; }
+    .empty-state .bi { font-size: 2rem; margin-bottom: .6rem; display: block; opacity: .4; }
+    .spin { animation: spin .7s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Modal */
+    .modal-content { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; color: #e8e8f0; }
+    .modal-header { border-bottom: 1px solid var(--border); padding: 1.25rem 1.5rem; }
+    .modal-footer { border-top: 1px solid var(--border); padding: 1rem 1.5rem; }
+    .modal-title { font-weight: 600; display: flex; align-items: center; gap: .5rem; }
+    .modal-title .bi { color: var(--danger); }
+    .modal-body { padding: 1.25rem 1.5rem; max-height: 60vh; overflow-y: auto; }
+    .plan-summary {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+      padding: .9rem 1.1rem; margin-bottom: 1rem; display: flex; gap: 1.75rem; flex-wrap: wrap;
+    }
+    .plan-item {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+      padding: .75rem 1rem; margin-bottom: .6rem;
+    }
+    .plan-item .name { font-weight: 600; font-size: .9rem; margin-bottom: .25rem; word-break: break-word; }
+    .plan-item .meta { color: var(--text-muted); font-size: .78rem; margin-bottom: .35rem; }
+    .plan-step { font-size: .76rem; color: var(--text-muted); font-family: monospace; }
+    .warning-text { color: var(--warn); font-size: .85rem; margin-top: .9rem; display: flex; align-items: center; gap: .4rem; }
+    .modal-error { color: #e05c5c; font-size: .83rem; margin-top: .6rem; display: none; white-space: pre-wrap; }
+    .btn-confirm-delete {
+      background: var(--danger); border: none; color: #fff; border-radius: 8px;
+      padding: .5rem 1.25rem; font-size: .88rem; font-weight: 600;
+      transition: background .15s, transform .1s;
+    }
+    .btn-confirm-delete:hover { background: #c94a4a; transform: scale(1.02); }
+    .btn-confirm-delete:disabled { opacity: .6; pointer-events: none; }
+    .btn-cancel {
+      background: var(--surface2); border: 1px solid var(--border); color: #e8e8f0;
+      border-radius: 8px; padding: .5rem 1.1rem; font-size: .88rem;
+    }
+    .btn-cancel:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+    /* Results + journal */
+    .results-card, .journal-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 1.1rem 1.25rem; margin-top: 1.25rem; display: none;
+    }
+    .result-item {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+      padding: .7rem 1rem; margin-bottom: .6rem;
+    }
+    .result-item:last-child { margin-bottom: 0; }
+    .result-item .name { font-weight: 600; font-size: .88rem; margin-bottom: .2rem; word-break: break-word; }
+    .status-badge {
+      display: inline-block; border-radius: 999px; padding: .15em .65em; font-size: .72rem; font-weight: 600;
+      margin-left: .5rem; text-transform: uppercase; letter-spacing: .03em;
+    }
+    .status-deleted { background: rgba(80,200,120,.15); color: #6fd98e; }
+    .status-partial { background: rgba(240,160,96,.15); color: var(--warn); }
+    .status-failed  { background: rgba(224,92,92,.15); color: #f0a0a0; }
+    .step-line { font-size: .76rem; font-family: monospace; color: var(--text-muted); }
+    .step-line.step-error { color: #f0a0a0; }
+    .journal-entry {
+      border-bottom: 1px solid var(--border); padding: .55rem 0; font-size: .8rem;
+    }
+    .journal-entry:last-child { border-bottom: none; }
+    .journal-ts { color: var(--text-muted); font-size: .72rem; }
+    .btn-link {
+      background: none; border: none; color: #7aabf5; font-size: .85rem; cursor: pointer;
+      padding: .2rem 0; text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">
+    <div class="icon-wrap"><i class="bi bi-collection-play-fill text-white"></i></div>
+    Library Cleanup
+  </div>
+  <div style="display:flex;gap:.5rem">
+    <a href="/" class="btn-back"><i class="bi bi-arrow-left"></i> Back</a>
+    <a href="/settings" class="btn-back" title="Settings"><i class="bi bi-gear"></i></a>
+  </div>
+</header>
+
+<div class="controls-bar">
+  <div class="control-group">
+    <label for="ageDays">Age (days)</label>
+    <input type="number" id="ageDays" min="0" placeholder="180">
+  </div>
+  <div class="control-group">
+    <label for="idleDays">Idle (days)</label>
+    <input type="number" id="idleDays" min="0" placeholder="90">
+  </div>
+  <button class="btn-refresh" id="rescanBtn" onclick="loadCandidates()">
+    <i class="bi bi-arrow-clockwise" id="rescanIcon"></i> Rescan
+  </button>
+  <button class="btn-refresh" id="journalToggleBtn" onclick="toggleJournal()" style="margin-left:auto">
+    <i class="bi bi-journal-text"></i> Journal
+  </button>
+</div>
+
+<main class="main-content">
+  <div class="alert-error" id="errorBox"></div>
+
+  <div class="summary-bar">
+    <div class="summary-stats">
+      <div class="stat-item">
+        <span class="stat-label">Selected</span>
+        <span class="badge-pill" id="selCount">0</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label" id="reclaimLabel">Est. reclaimable</span>
+        <span class="stat-value" id="reclaimSize" style="color:#a89df9">—</span>
+      </div>
+    </div>
+    <button class="btn-preflight" id="preflightBtn" onclick="runPreflight()" disabled>
+      <i class="bi bi-clipboard-check" id="preflightIcon"></i> Preflight
+    </button>
+  </div>
+  <div class="alert-warn" id="reclaimWarn">
+    <i class="bi bi-exclamation-triangle-fill"></i>
+    Some selected titles share files with active torrents and may free less than their listed size until confirmed by Preflight.
+  </div>
+
+  <div id="sections"></div>
+
+  <div class="results-card" id="resultsCard">
+    <div style="font-weight:600;margin-bottom:.75rem"><i class="bi bi-list-check"></i> Run results</div>
+    <div id="resultsBody"></div>
+  </div>
+
+  <div class="journal-card" id="journalCard">
+    <div style="font-weight:600;margin-bottom:.75rem"><i class="bi bi-journal-text"></i> Journal</div>
+    <div id="journalBody"></div>
+  </div>
+</main>
+
+<!-- Preflight / delete modal -->
+<div class="modal fade" id="preflightModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-trash3-fill"></i> Preflight results</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="plan-summary" id="planSummary"></div>
+        <div id="planItems"></div>
+        <div class="warning-text"><i class="bi bi-exclamation-triangle-fill"></i> This action cannot be undone.</div>
+        <div class="modal-error" id="modalError"></div>
+      </div>
+      <div class="modal-footer" style="gap:.5rem">
+        <button class="btn-cancel" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn-confirm-delete" id="confirmDeleteBtn" onclick="executeDelete()">
+          <i class="bi bi-trash3"></i> Delete permanently
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const BUCKET_ORDER = ["A", "B", "C1", "C2", "C3"];
+
+let _candidates  = [];
+let _labels      = {};
+let _preticked   = [];
+let _checked     = new Set();
+let _sectionOpen = { A: true, B: true, C1: true, C2: true, C3: false };
+
+let _lastPlanIds    = null; // Set of jf_ids the last successful /plan call covered
+let _lastPlanResult = null; // the /plan response body
+let _executeArmed   = false;
+let _executing      = false;
+let _modal          = null;
+let _journalOpen     = false;
+let _journalLoaded    = false;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function formatBytes(bytes) {
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  bytes = Number(bytes) || 0;
+  while (bytes >= 1024 && i < u.length - 1) { bytes /= 1024; i++; }
+  return bytes.toFixed(2) + " " + u[i];
+}
+
+function formatDate(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function setsEqual(a, b) {
+  if (a === null || b === null) return false;
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+
+function el(tag, opts) {
+  const node = document.createElement(tag);
+  opts = opts || {};
+  if (opts.className) node.className = opts.className;
+  if (opts.text !== undefined) node.textContent = opts.text;
+  return node;
+}
+
+function icon(className) {
+  return el("i", { className: className });
+}
+
+// Sets a button's/element's content to an icon followed by a text label,
+// without ever touching innerHTML.
+function setIconLabel(node, iconClass, label) {
+  node.textContent = "";
+  node.appendChild(icon(iconClass));
+  node.appendChild(document.createTextNode(" " + label));
+}
+
+// A labeled stat: <span class="stat-label">label</span><span class="...">value</span>
+function statItem(label, value, valueClassName) {
+  const wrap = el("div", { className: "stat-item" });
+  wrap.appendChild(el("span", { className: "stat-label", text: label }));
+  const valueSpan = el("span", { className: valueClassName || "stat-value", text: value });
+  wrap.appendChild(valueSpan);
+  return wrap;
+}
+
+// ── Load candidates ──────────────────────────────────────────────────────────
+async function loadCandidates() {
+  const errorBox = document.getElementById("errorBox");
+  const icon     = document.getElementById("rescanIcon");
+  const btn      = document.getElementById("rescanBtn");
+
+  icon.classList.add("spin");
+  btn.disabled = true;
+  errorBox.style.display = "none";
+
+  const age  = document.getElementById("ageDays").value.trim();
+  const idle = document.getElementById("idleDays").value.trim();
+  const params = new URLSearchParams();
+  if (age)  params.set("age_days", age);
+  if (idle) params.set("idle_days", idle);
+
+  try {
+    const resp = await fetch("/api/library/candidates?" + params.toString());
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    _candidates = data.candidates || [];
+    _preticked  = data.preticked || [];
+    _labels     = data.labels || {};
+    document.getElementById("ageDays").value  = data.age_days;
+    document.getElementById("idleDays").value = data.idle_days;
+
+    _checked = new Set(
+      _candidates.filter(c => _preticked.includes(c.bucket)).map(c => c.jf_id)
+    );
+    _lastPlanIds = null;
+    _lastPlanResult = null;
+
+    renderSections();
+    updateSummary();
+  } catch (err) {
+    errorBox.textContent = "Error: " + err.message;
+    errorBox.style.display = "block";
+    _candidates = [];
+    document.getElementById("sections").textContent = "";
+    updateSummary();
+  } finally {
+    icon.classList.remove("spin");
+    btn.disabled = false;
+  }
+}
+
+// ── Render bucket sections ──────────────────────────────────────────────────
+function renderSections() {
+  const container = document.getElementById("sections");
+  container.textContent = "";
+
+  const byBucket = {};
+  BUCKET_ORDER.forEach(b => byBucket[b] = []);
+  _candidates.forEach(c => { if (byBucket[c.bucket]) byBucket[c.bucket].push(c); });
+
+  if (_candidates.length === 0) {
+    const empty = el("div", { className: "empty-state" });
+    empty.appendChild(icon("bi bi-check-circle"));
+    empty.appendChild(document.createTextNode("No stale titles found."));
+    container.appendChild(empty);
+    return;
+  }
+
+  BUCKET_ORDER.forEach(bucket => {
+    const items = byBucket[bucket];
+    container.appendChild(buildSection(bucket, items));
+  });
+}
+
+function buildSection(bucket, items) {
+  const section = el("div", { className: "bucket-section" + (_sectionOpen[bucket] ? " section-open" : "") });
+  section.dataset.bucket = bucket;
+
+  const totalSize = items.reduce((a, c) => a + (c.size_bytes || 0), 0);
+
+  const header = el("div", { className: "section-header" });
+  const titleWrap = el("div", { className: "section-title" });
+  titleWrap.appendChild(el("span", { text: _labels[bucket] || bucket }));
+  titleWrap.appendChild(el("span", {
+    className: "bucket-count",
+    text: `${items.length} item${items.length === 1 ? "" : "s"} · ${formatBytes(totalSize)}`
+  }));
+  header.appendChild(titleWrap);
+
+  const headerRight = el("div");
+  headerRight.style.display = "flex";
+  headerRight.style.alignItems = "center";
+  headerRight.style.gap = ".6rem";
+  headerRight.appendChild(icon("bi bi-chevron-down section-chevron"));
+  header.appendChild(headerRight);
+
+  header.addEventListener("click", () => {
+    _sectionOpen[bucket] = !_sectionOpen[bucket];
+    section.classList.toggle("section-open", _sectionOpen[bucket]);
+  });
+
+  section.appendChild(header);
+
+  const body = el("div", { className: "section-body" });
+  body.appendChild(buildTable(bucket, items));
+  section.appendChild(body);
+
+  return section;
+}
+
+const TABLE_COLUMNS = [
+  { text: "",            width: "36px"  },
+  { text: "Title" },
+  { text: "Kind",        width: "70px"  },
+  { text: "Progress",    width: "110px" },
+  { text: "Size",        width: "100px" },
+  { text: "Added",       width: "110px" },
+  { text: "Last played", width: "110px" },
+  { text: "Owner",       width: "120px" },
+  { text: "Flags" },
+];
+
+function buildTable(bucket, items) {
+  const scroll = el("div", { className: "table-scroll" });
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  TABLE_COLUMNS.forEach(col => {
+    const th = el("th", { text: col.text });
+    if (col.width) th.style.width = col.width;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  if (items.length === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 9;
+    td.appendChild(el("div", { className: "empty-state", text: "Nothing in this bucket." }));
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  } else {
+    items.forEach(c => tbody.appendChild(buildRow(c)));
+  }
+  table.appendChild(tbody);
+  scroll.appendChild(table);
+  return scroll;
+}
+
+function buildRow(c) {
+  const tr = document.createElement("tr");
+  tr.dataset.jfid = c.jf_id;
+
+  // Checkbox
+  const tdCheck = document.createElement("td");
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.className = "row-check";
+  cb.checked = _checked.has(c.jf_id);
+  cb.addEventListener("change", () => {
+    if (cb.checked) _checked.add(c.jf_id); else _checked.delete(c.jf_id);
+    updateSummary();
+  });
+  tdCheck.appendChild(cb);
+  tr.appendChild(tdCheck);
+
+  // Title (textContent only -- titles are user-controlled and may contain
+  // Hebrew text or quotes; never rendered via innerHTML)
+  const tdTitle = document.createElement("td");
+  const nameDiv = el("div", { className: "torrent-name", text: c.title || "" });
+  const pathDiv = el("div", { className: "torrent-path", text: c.path || "" });
+  tdTitle.appendChild(nameDiv);
+  tdTitle.appendChild(pathDiv);
+  tr.appendChild(tdTitle);
+
+  // Kind
+  tr.appendChild(el("td", { text: c.kind === "series" ? "Series" : "Movie" }));
+
+  // Progress
+  const tdProgress = document.createElement("td");
+  const progressText = c.kind === "series"
+    ? `${c.watched}/${c.episodes}`
+    : `${Math.round(c.progress_pct || 0)}%`;
+  tdProgress.appendChild(el("span", { className: "date-text", text: progressText }));
+  tr.appendChild(tdProgress);
+
+  // Size
+  const tdSize = document.createElement("td");
+  tdSize.appendChild(el("span", { className: "size-badge", text: formatBytes(c.size_bytes) }));
+  tr.appendChild(tdSize);
+
+  // Added
+  const tdAdded = document.createElement("td");
+  tdAdded.appendChild(el("span", { className: "date-text", text: formatDate(c.added) || "—" }));
+  tr.appendChild(tdAdded);
+
+  // Last played
+  const tdLast = document.createElement("td");
+  tdLast.appendChild(el("span", { className: "date-text", text: formatDate(c.last_played) || "never" }));
+  tr.appendChild(tdLast);
+
+  // Owner
+  const tdOwner = document.createElement("td");
+  if (c.owner) {
+    tdOwner.appendChild(el("span", { className: "owner-chip", text: c.owner }));
+  } else {
+    tdOwner.appendChild(el("span", { className: "owner-none", text: "no *arr owner" }));
+  }
+  tr.appendChild(tdOwner);
+
+  // Flags
+  const tdFlags = document.createElement("td");
+  (c.flags || []).forEach(flag => {
+    tdFlags.appendChild(el("span", { className: "flag-chip", text: flag }));
+  });
+  tr.appendChild(tdFlags);
+
+  return tr;
+}
+
+// ── Summary ──────────────────────────────────────────────────────────────────
+function updateSummary() {
+  const selected = _candidates.filter(c => _checked.has(c.jf_id));
+  document.getElementById("selCount").textContent = selected.length;
+
+  const label = document.getElementById("reclaimLabel");
+  const sizeEl = document.getElementById("reclaimSize");
+  const warnEl = document.getElementById("reclaimWarn");
+
+  const confirmed = _lastPlanIds && setsEqual(_lastPlanIds, _checked);
+  let total;
+  if (confirmed) {
+    total = _lastPlanResult.real_bytes;
+    label.textContent = "Reclaimable (confirmed)";
+  } else {
+    total = selected.reduce((a, c) => a + (c.size_bytes || 0), 0);
+    label.textContent = "Est. reclaimable";
+  }
+  sizeEl.textContent = selected.length ? formatBytes(total) : "—";
+
+  const hasFreeLessFlag = !confirmed && selected.some(c => (c.flags || []).includes("frees-less-than-listed"));
+  warnEl.style.display = hasFreeLessFlag ? "block" : "none";
+
+  document.getElementById("preflightBtn").disabled = selected.length === 0;
+}
+
+// ── Preflight ────────────────────────────────────────────────────────────────
+async function runPreflight() {
+  if (_checked.size === 0) return;
+  const btn  = document.getElementById("preflightBtn");
+  const icon = document.getElementById("preflightIcon");
+  const errorBox = document.getElementById("errorBox");
+
+  const requestedIds = new Set(_checked);
+  btn.disabled = true;
+  icon.className = "bi bi-arrow-repeat spin";
+  errorBox.style.display = "none";
+
+  try {
+    const resp = await fetch("/api/library/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jf_ids: [...requestedIds] }),
+    });
+    const data = await resp.json();
+
+    if (resp.ok) {
+      _lastPlanIds = requestedIds;
+      _lastPlanResult = data;
+      _executeArmed = false;
+      openPlanModal(data);
+      updateSummary();
+    } else {
+      // Surfaced verbatim, including the 409 blast_radius case -- the UI
+      // does not invent friendlier copy over the server's error string.
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
+  } catch (err) {
+    errorBox.textContent = "Error: " + err.message;
+    errorBox.style.display = "block";
+  } finally {
+    btn.disabled = _checked.size === 0;
+    icon.className = "bi bi-clipboard-check";
+  }
+}
+
+function openPlanModal(data) {
+  const summary = document.getElementById("planSummary");
+  summary.textContent = "";
+  summary.appendChild(statItem("Titles", data.count));
+  summary.appendChild(statItem("Listed size", formatBytes(data.total_bytes)));
+  summary.appendChild(statItem("Reclaimable (real)", formatBytes(data.real_bytes), "stat-value plan-real-bytes"));
+
+  const items = document.getElementById("planItems");
+  items.textContent = "";
+  (data.titles || []).forEach(t => {
+    const box = el("div", { className: "plan-item" });
+    box.appendChild(el("div", { className: "name", text: t.title || "" }));
+    const meta = t.owner
+      ? `${t.owner} · ${formatBytes(t.real_bytes)} reclaimable (listed ${formatBytes(t.size_bytes)})`
+      : `no *arr owner · ${formatBytes(t.real_bytes)} reclaimable (listed ${formatBytes(t.size_bytes)})`;
+    box.appendChild(el("div", { className: "meta", text: meta }));
+    (t.steps || []).forEach(step => {
+      box.appendChild(el("div", { className: "plan-step", text: step }));
+    });
+    items.appendChild(box);
+  });
+
+  document.getElementById("modalError").style.display = "none";
+  const confirmBtn = document.getElementById("confirmDeleteBtn");
+  confirmBtn.disabled = false;
+  setIconLabel(confirmBtn, "bi bi-trash3", "Delete permanently");
+
+  if (!_modal) _modal = new bootstrap.Modal(document.getElementById("preflightModal"));
+  _modal.show();
+}
+
+// ── Execute (Delete) ─────────────────────────────────────────────────────────
+async function executeDelete() {
+  // Unreachable without a successful preflight: this button only exists
+  // inside the modal, which is only ever opened from a successful /plan
+  // response, and it always sends exactly the ids that plan covered.
+  if (!_lastPlanIds || _executing) return;
+
+  const btn   = document.getElementById("confirmDeleteBtn");
+  const errEl = document.getElementById("modalError");
+  _executing = true;
+  btn.disabled = true;
+  setIconLabel(btn, "bi bi-arrow-repeat spin", "Deleting…");
+  errEl.style.display = "none";
+
+  try {
+    const resp = await fetch("/api/library/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jf_ids: [..._lastPlanIds] }),
+    });
+    const data = await resp.json();
+
+    if (resp.ok) {
+      renderResults(data.results || []);
+      _lastPlanIds = null;
+      _lastPlanResult = null;
+      _executeArmed = false;
+      _modal.hide();
+      // Refresh the list so deleted/changed titles drop out of the buckets.
+      await loadCandidates();
+      return;
+    }
+
+    if (resp.status === 409 && data.blast_radius) {
+      if (!_executeArmed) {
+        _executeArmed = true;
+        errEl.textContent = data.error + "\n\nClick Delete permanently again to retry.";
+        errEl.style.display = "block";
+        btn.disabled = false;
+        setIconLabel(btn, "bi bi-trash3", "Confirm & delete anyway");
+      } else {
+        // Second explicit click: surface whatever the server says this time,
+        // verbatim, without silently looping.
+        errEl.textContent = data.error;
+        errEl.style.display = "block";
+        btn.disabled = false;
+      }
+      return;
+    }
+
+    // Any other non-2xx (e.g. selection changed since preflight, or a run
+    // already in progress): surface verbatim and force the user back to
+    // Preflight -- the stale plan is no longer valid.
+    errEl.textContent = data.error || `HTTP ${resp.status}`;
+    errEl.style.display = "block";
+    btn.disabled = true;
+    _lastPlanIds = null;
+    _lastPlanResult = null;
+  } catch (err) {
+    errEl.textContent = "Failed: " + err.message;
+    errEl.style.display = "block";
+    btn.disabled = false;
+    setIconLabel(btn, "bi bi-trash3", "Delete permanently");
+  } finally {
+    _executing = false;
+  }
+}
+
+// ── Results panel ────────────────────────────────────────────────────────────
+function renderResults(results) {
+  const card = document.getElementById("resultsCard");
+  const body = document.getElementById("resultsBody");
+  body.textContent = "";
+
+  if (results.length === 0) {
+    card.style.display = "none";
+    return;
+  }
+
+  results.forEach(r => {
+    const item = el("div", { className: "result-item" });
+    const nameLine = el("div", { className: "name" });
+    nameLine.appendChild(document.createTextNode(r.title || r.jf_id || ""));
+    const badge = el("span", {
+      className: "status-badge status-" + (r.status || "unknown"),
+      text: r.status || "unknown"
+    });
+    nameLine.appendChild(badge);
+    item.appendChild(nameLine);
+
+    (r.steps || []).forEach(step => {
+      const isError = step.status && step.status !== "ok";
+      const line = el("div", {
+        className: "step-line" + (isError ? " step-error" : ""),
+        text: `${step.step}: ${step.status}${step.detail ? " (" + step.detail + ")" : ""}`
+      });
+      item.appendChild(line);
+    });
+
+    body.appendChild(item);
+  });
+
+  card.style.display = "block";
+}
+
+// ── Journal ──────────────────────────────────────────────────────────────────
+async function toggleJournal() {
+  _journalOpen = !_journalOpen;
+  const card = document.getElementById("journalCard");
+  card.style.display = _journalOpen ? "block" : "none";
+  if (_journalOpen && !_journalLoaded) {
+    await loadJournal();
+  }
+}
+
+async function loadJournal() {
+  const body = document.getElementById("journalBody");
+  body.textContent = "Loading…";
+  try {
+    const resp = await fetch("/api/library/journal");
+    const data = await resp.json();
+    if (!resp.ok) throw new Error((data && data.error) || `HTTP ${resp.status}`);
+
+    body.textContent = "";
+    if (!data.length) {
+      body.appendChild(el("div", { className: "empty-state", text: "No journal entries yet." }));
+    } else {
+      data.forEach(entry => body.appendChild(buildJournalEntry(entry)));
+    }
+    _journalLoaded = true;
+  } catch (err) {
+    body.textContent = "";
+    body.appendChild(el("div", { className: "empty-state", text: "Error: " + err.message }));
+  }
+}
+
+function buildJournalEntry(entry) {
+  const row = el("div", { className: "journal-entry" });
+  const ts = el("div", { className: "journal-ts", text: entry.ts || "" });
+  row.appendChild(ts);
+
+  // Not every journal entry describes a title -- the Transmission sweep
+  // writes its own summary entry with no "title" key.
+  if (!("title" in entry)) {
+    const detail = entry.status === "error"
+      ? `Transmission sweep failed: ${entry.detail || ""}`
+      : `Transmission sweep — removed ${entry.removed || 0}, kept ${entry.kept || 0} (still seeding)`;
+    row.appendChild(el("div", { text: detail }));
+    return row;
+  }
+
+  const line = document.createElement("div");
+  line.appendChild(document.createTextNode((entry.title || "") + " "));
+  const badge = el("span", {
+    className: "status-badge status-" + (entry.status || "unknown"),
+    text: entry.status || "unknown"
+  });
+  line.appendChild(badge);
+  row.appendChild(line);
+
+  if (entry.owner) {
+    row.appendChild(el("div", { className: "journal-ts", text: `owner: ${entry.owner}` }));
+  }
+  (entry.steps || []).forEach(step => {
+    row.appendChild(el("div", {
+      className: "step-line" + (step.status && step.status !== "ok" ? " step-error" : ""),
+      text: `${step.step}: ${step.status}${step.detail ? " (" + step.detail + ")" : ""}`
+    }));
+  });
+
+  return row;
+}
+
+loadCandidates();
+</script>
+</body>
+</html>
