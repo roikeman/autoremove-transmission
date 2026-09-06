@@ -537,8 +537,10 @@ def _scan(cfg):
         radarr_items = ArrClient(cfg["radarr_url"], cfg["radarr_api_key"], "radarr").list_items()
     owner_index = cand.build_owner_index(sonarr_items, radarr_items)
 
+    users = jf.users()
+
     merged = {}
-    for user in jf.users():
+    for user in users:
         uid = user["Id"]
         for item in jf.items(uid, "Series"):
             _merge(merged, cand.from_series(item, owner_index))
@@ -548,8 +550,100 @@ def _scan(cfg):
     now = datetime.now()
     age = int(cfg["age_days"])
     idle = int(cfg["idle_days"])
+
+    # Jellyfin's Series payload carries neither RecursiveItemCount nor
+    # MediaSources -- episode counts and file sizes live on the Episode
+    # items beneath it -- so the cheap pass above leaves every series at
+    # episodes=0/size_bytes=0 with an unknown watched count. Fetch the real
+    # numbers per series, but only for series that already look stale by
+    # the Series-level added/last_played fields computed above: an episode
+    # fetch is one Jellyfin HTTP round trip per user, so doing it for the
+    # whole library would multiply scan time for titles this scan is going
+    # to drop anyway.
+    for candidate in merged.values():
+        if candidate.kind != "series":
+            continue
+        if not cand.is_stale(candidate.added, candidate.last_played, now, age, idle):
+            continue
+        _enrich_series_with_episodes(candidate, candidate.jf_id, users, jf)
+
     return [c for c in merged.values()
             if cand.is_stale(c.added, c.last_played, now, age, idle)]
+
+
+def _enrich_series_with_episodes(candidate, series_id, users, jf):
+    """Fold real episode-derived episodes/watched/size_bytes/added into
+    `candidate` (a series Candidate already built from the cheap
+    Series-level pass) and re-run its bucket classification.
+
+    UserData.Played is per-user, so the episode list is fetched once per
+    Jellyfin user -- mirroring how the rest of _scan already merges
+    per-user series/movie data -- and folded in with equivalent semantics
+    to _merge(): the most-watched view wins across the household, so a
+    series watched by any household member counts as watched. Episode
+    size/DateCreated are item metadata, not user data, and should agree
+    across every user's fetch; taking the max across users is a defensive
+    tie-breaker, not a real merge, in case one user's fetch is truncated
+    relative to another's (e.g. parental-control filtering).
+
+    If every user's fetch raises or comes back empty, the series' episode
+    data is UNKNOWN. That must never be silently treated as "zero
+    episodes, zero watched" -- the original bug -- so the candidate is
+    flagged and forced out of any pre-ticked delete-by-default bucket
+    instead.
+    """
+    any_success = False
+    max_episodes = 0
+    max_watched = 0
+    max_size = 0
+    max_added = None
+
+    for user in users:
+        uid = user["Id"]
+        try:
+            eps = jf.episodes(uid, series_id)
+        except Exception:
+            continue
+        if not eps:
+            continue
+
+        any_success = True
+        total = len(eps)
+        watched_u = sum(1 for ep in eps if (ep.get("UserData") or {}).get("Played"))
+        size_u = sum(cand._size_of(ep) for ep in eps)
+        added_u = None
+        for ep in eps:
+            dt = cand.parse_dt(ep.get("DateCreated"))
+            if dt and (added_u is None or dt > added_u):
+                added_u = dt
+
+        max_episodes = max(max_episodes, total)
+        max_watched = max(max_watched, watched_u)
+        max_size = max(max_size, size_u)
+        if added_u and (max_added is None or added_u > max_added):
+            max_added = added_u
+
+    if not any_success:
+        candidate.flags = buckets.quality_flags(candidate.added, candidate.last_played, False)
+        candidate.flags.append("episode-data-unavailable")
+        # Unlike the watch-count-unavailable path in from_series, there is
+        # no "legitimately bucket A" exception here: with the episode fetch
+        # having produced nothing at all, there is zero real evidence for
+        # this series one way or the other, so it must never be pre-ticked.
+        if candidate.bucket in buckets.PRETICKED:
+            candidate.bucket = buckets.MID_WATCH
+        return
+
+    candidate.episodes = max_episodes
+    candidate.watched = max_watched
+    candidate.size_bytes = max_size
+    if max_added is not None:
+        candidate.added = max_added
+
+    candidate.flags = buckets.quality_flags(candidate.added, candidate.last_played, False)
+    candidate.bucket = buckets.classify(
+        candidate.kind, candidate.episodes, candidate.watched,
+        candidate.last_played, candidate.progress_pct)
 
 
 def _merge(store, candidate):
