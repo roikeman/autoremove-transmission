@@ -52,3 +52,15 @@ def test_secrets_are_never_written(tmp_path, monkeypatch):
     path = _redirect(tmp_path, monkeypatch)
     journal.append({"title": "A", "jellyfin_api_key": "leak", "sonarr_api_key": "leak"})
     assert "leak" not in path.read_text()
+
+
+def test_nested_secret_is_redacted(tmp_path, monkeypatch):
+    path = _redirect(tmp_path, monkeypatch)
+    journal.append({"title": "A", "meta": {"jellyfin_api_key": "leak"}})
+    assert "leak" not in path.read_text()
+
+
+def test_secret_nested_in_list_of_dicts_is_redacted(tmp_path, monkeypatch):
+    path = _redirect(tmp_path, monkeypatch)
+    journal.append({"title": "A", "items": [{"sonarr_api_key": "leak"}, {"ok": 1}]})
+    assert "leak" not in path.read_text()

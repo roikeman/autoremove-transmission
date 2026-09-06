@@ -10,9 +10,21 @@ JOURNAL_PATH = os.environ.get("JOURNAL_PATH", "/config/cleanup-journal.jsonl")
 _lock = threading.Lock()
 
 
+def _redact(value):
+    """Recursively drop keys in config.SECRET_KEYS from dicts, including
+    dicts nested inside lists."""
+    if isinstance(value, dict):
+        return {
+            k: _redact(v) for k, v in value.items() if k not in cfg_mod.SECRET_KEYS
+        }
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+
 def append(entry):
     """Append one entry. Append-only: existing lines are never rewritten."""
-    record = {k: v for k, v in entry.items() if k not in cfg_mod.SECRET_KEYS}
+    record = _redact(entry)
     record["ts"] = datetime.now().isoformat(timespec="seconds")
 
     with _lock:

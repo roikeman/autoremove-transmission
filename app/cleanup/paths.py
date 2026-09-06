@@ -17,6 +17,8 @@ def assert_within_roots(path, roots):
     resolved = os.path.realpath(path)
 
     for root in roots or []:
+        if not root:
+            continue
         real_root = os.path.realpath(root)
         if resolved == real_root or resolved.startswith(real_root + os.sep):
             return os.path.normpath(resolved)
@@ -36,8 +38,13 @@ def delete_file(path, roots):
     os.remove(safe)
 
     parent = os.path.dirname(safe)
+    real_roots = {os.path.realpath(root) for root in roots or [] if root}
     try:
-        if os.path.isdir(parent) and not os.listdir(parent):
+        if (
+            os.path.isdir(parent)
+            and parent not in real_roots
+            and not os.listdir(parent)
+        ):
             os.rmdir(parent)
     except OSError:
         pass

@@ -76,3 +76,21 @@ def test_delete_file_prunes_empty_parent(tmp_path):
     target.write_bytes(b"x")
     delete_file(str(target), [str(tmp_path)])
     assert not nested.exists()
+
+
+def test_delete_file_does_not_remove_root_itself(tmp_path):
+    root = tmp_path / "share"
+    root.mkdir()
+    target = root / "only.mkv"
+    target.write_bytes(b"x")
+    delete_file(str(target), [str(root)])
+    assert not target.exists()
+    assert root.exists()
+
+
+def test_empty_string_root_rejects_path_under_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "x.mkv"
+    target.write_bytes(b"x")
+    with pytest.raises(PathOutsideRoots):
+        assert_within_roots(str(target), [""])
