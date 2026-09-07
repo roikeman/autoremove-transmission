@@ -4,10 +4,31 @@ from dataclasses import dataclass
 
 from cleanup import journal
 from cleanup.paths import assert_within_roots, delete_file, PathOutsideRoots
+from clients.transmission import normalize_path
 
 
 class BlastRadiusExceeded(Exception):
     """Selection exceeds the configured per-run caps."""
+
+
+# Metadata/artwork extensions eligible for pruning once a title's deletion
+# steps have succeeded -- see prune_leftovers(). Matched case-insensitively
+# against os.path.splitext's extension (the part including the leading
+# dot). Deliberately narrow: only file types that are unambiguously
+# metadata or artwork ever written by Sonarr/Radarr/Jellyfin scrapers, never
+# anything that could plausibly be media itself.
+#   .nfo                    Kodi/*arr metadata (the tvshow.nfo/movie.nfo case
+#                           from production)
+#   .jpg .jpeg .png .webp   poster/fanart/thumb artwork
+#   .tbn                    Kodi thumbnail (legacy alias for a poster image)
+#   .bif                    Jellyfin/Emby trickplay index sidecar
+#   .srt .sub .idx .ass .ssa .vtt
+#                           subtitle sidecar files (.sub always pairs with
+#                           .idx, never shipped as a standalone video)
+PRUNABLE_EXTENSIONS = {
+    ".nfo", ".jpg", ".jpeg", ".png", ".webp", ".tbn", ".bif",
+    ".srt", ".sub", ".idx", ".ass", ".ssa", ".vtt",
+}
 
 
 @dataclass
@@ -156,6 +177,14 @@ def _capture_inode_keys(path):
     distinct space did this actually free" accounting is a separate
     question, answered by _real_bytes()/the frees-less-than-listed flag,
     not by bytes_freed).
+
+    A file matching PRUNABLE_EXTENSIONS (tvshow.nfo and friends) is stated
+    for inode-key purposes but excluded from total_size: the *arr's own
+    delete call only ever removes the media files it manages, never the
+    metadata/artwork sidecars it doesn't track -- that gap surviving as a
+    ghost directory is exactly the bug prune_leftovers() exists to fix.
+    Counting a sidecar's bytes here AND again when prune_leftovers()
+    actually removes it later would double-count them in bytes_freed.
     """
     keys = set()
     total_size = 0
@@ -177,7 +206,8 @@ def _capture_inode_keys(path):
         except OSError:
             continue
         keys.add((info.st_dev, info.st_ino))
-        total_size += info.st_size
+        if not _is_prunable(file_path):
+            total_size += info.st_size
     return keys, total_size
 
 
@@ -269,6 +299,30 @@ def _execute_one(candidate, cfg, clients):
         steps.append({"step": "jellyfin:delete", "status": "error", "detail": str(exc)})
         status = "partial"
 
+    # 3. Prune leftover metadata/artwork -- ONLY once both steps above have
+    # actually succeeded (status is still "deleted"). A "partial" or
+    # "failed" title keeps its directory completely untouched: the owner
+    # and/or Jellyfin state is inconsistent, so nothing under its path is
+    # this code's to clean up yet. A pruning failure is journaled but must
+    # never fail the run or this title's own "deleted" status -- the title
+    # itself is already fully gone by this point; a leftover-metadata
+    # problem is strictly secondary.
+    if status == "deleted":
+        try:
+            pruned_bytes, pruned_files = prune_leftovers(
+                candidate.path, cfg.get("library_roots") or [])
+            if pruned_files:
+                freed += pruned_bytes
+                journal.append({
+                    "kind": "prune", "jf_id": candidate.jf_id, "title": candidate.title,
+                    "status": "ok", "files_pruned": pruned_files, "bytes_freed": pruned_bytes,
+                })
+        except Exception as exc:
+            journal.append({
+                "kind": "prune", "jf_id": candidate.jf_id, "title": candidate.title,
+                "status": "error", "detail": str(exc),
+            })
+
     return _finish(candidate, status, steps, freed), inode_keys
 
 
@@ -292,9 +346,118 @@ def _delete_tree(path, roots):
     return freed
 
 
-def _torrent_inode_keys(torrent):
-    """The {(st_dev, st_ino)} set for a torrent's on-disk files."""
-    download_dir = torrent.get("downloadDir", "")
+def _is_prunable(filename):
+    _, ext = os.path.splitext(filename)
+    return ext.lower() in PRUNABLE_EXTENSIONS
+
+
+def prune_leftovers(path, roots):
+    """Remove leftover metadata/artwork files -- and the now-empty
+    directories they leave behind -- under a title's path, once that
+    title's own deletion steps have already succeeded.
+
+    THE FAIL-SAFE RULE: the whole tree under `path` is scanned FIRST, and if
+    a single file anywhere in it (nested season directories included) does
+    not match PRUNABLE_EXTENSIONS, nothing is deleted at all -- not even the
+    files that would otherwise qualify. Never delete a file this function
+    does not positively recognise; a lone unexpected file (an .mkv left
+    behind, an unrelated .txt, a file with no extension at all) means hands
+    off the entire tree, every file in it, untouched.
+
+    CRITICAL: this function does NOT delegate to _delete_tree(). That
+    function performs its own, independent os.walk at deletion time with no
+    extension re-validation, which is a check-then-act race: anything that
+    appears under `path` between the validating walk above and that second
+    walk -- a concurrent Sonarr import, an in-flight transcode, a manual
+    copy -- would be deleted unconditionally, whatever its type, defeating
+    the fail-safe rule entirely. Instead, the validating walk below COLLECTS
+    the concrete file paths it approves, and only those exact paths are ever
+    deleted -- nothing discovered by any later directory listing. Each path
+    is also re-checked against PRUNABLE_EXTENSIONS immediately before it is
+    actually deleted (belt and braces: the collected list plus a per-file
+    check at the moment of deletion); a path that no longer validates is
+    skipped, not deleted. A symlink is deleted via delete_file(), which
+    operates on the link node itself and never follows it -- so a symlink
+    only ever qualifies here by its own name's extension, exactly like any
+    other file, and its target is neither inspected nor touched.
+
+    Every file in the approved list is deleted independently: since each
+    one was individually re-validated as prunable right before its own
+    deletion, a failure partway through can only ever leave *prunable*
+    files behind (never anything the fail-safe rule above wouldn't already
+    have screened out) -- so a per-file error is caught, journaled by the
+    caller via the truthful files_pruned count returned below, and pruning
+    continues for the rest rather than aborting. Directories are then
+    removed deepest-first, but only if empty, and never a configured
+    library root -- the same guard _delete_tree already relies on
+    (test_delete_tree_never_rmdirs_a_configured_root), reimplemented here
+    directly since this function no longer calls _delete_tree.
+
+    Returns (bytes_freed, files_pruned) -- files_pruned is the count
+    actually removed, which can be less than the number originally
+    approved if a re-check or a delete_file call failed for some of them.
+    Both are 0 for a path that no longer exists, that resolves outside
+    every configured root, or that fails the fail-safe check above.
+    """
+    try:
+        safe = assert_within_roots(path, roots)
+    except PathOutsideRoots:
+        return 0, 0
+
+    if not os.path.isdir(safe):
+        return 0, 0
+
+    leftover_files = []
+    walked_dirs = []
+    for dirpath, _dirs, names in os.walk(safe):
+        walked_dirs.append(dirpath)
+        leftover_files.extend(os.path.join(dirpath, name) for name in names)
+
+    if not leftover_files:
+        return 0, 0
+    if not all(_is_prunable(f) for f in leftover_files):
+        return 0, 0
+
+    freed = 0
+    pruned = 0
+    for file_path in leftover_files:
+        if not _is_prunable(file_path):
+            # Re-checked immediately before deletion and no longer
+            # validates -- something changed it since the approval walk
+            # above. Skip it; never delete a path this check doesn't
+            # positively re-confirm right now.
+            continue
+        try:
+            freed += delete_file(file_path, roots)
+        except Exception:
+            # Every path reaching here was just re-validated as prunable,
+            # so this can only ever leave a still-prunable file behind.
+            # Keep going for the rest rather than aborting the whole prune.
+            continue
+        pruned += 1
+
+    real_roots = {os.path.realpath(root) for root in roots or [] if root}
+    for dirpath in reversed(walked_dirs):
+        if os.path.realpath(dirpath) in real_roots:
+            continue
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
+
+    return freed, pruned
+
+
+def _torrent_inode_keys(torrent, cfg=None):
+    """The {(st_dev, st_ino)} set for a torrent's on-disk files.
+
+    downloadDir is normalized through clients.transmission.normalize_path
+    first -- Transmission may report it under a mount prefix (e.g.
+    /downloads) that doesn't match the prefix this app sees on disk
+    (/share/downloads), which would otherwise make every stat below fail
+    and silently drop the torrent's files out of the inode-key set.
+    """
+    download_dir = normalize_path(torrent.get("downloadDir", ""), cfg)
     keys = set()
     for file_entry in torrent.get("files", []) or []:
         name = file_entry.get("name") or ""
@@ -335,7 +498,7 @@ def _sweep_torrents(cfg, clients, inode_keys):
     for torrent in clients.transmission.get_all_torrents():
         if not clients.transmission.is_deletable(torrent):
             continue
-        if not (inode_keys & _torrent_inode_keys(torrent)):
+        if not (inode_keys & _torrent_inode_keys(torrent, cfg)):
             continue
         if cfg.get("seed_guard") and should_keep_seeding(torrent, session_limit, min_seed_seconds):
             kept += 1

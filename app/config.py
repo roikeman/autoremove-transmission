@@ -26,6 +26,13 @@ DEFAULTS = {
     "max_titles_per_run":    50,
     "max_bytes_per_run":     1099511627776,
     "library_roots":         ["/share"],
+    # Transmission's container has overlapping bind mounts (e.g.
+    # /downloads and /share/downloads both resolve to the same data), so
+    # a torrent's reported downloadDir/file paths aren't reliably rooted
+    # at the prefix this app sees on disk. Each entry rewrites a source
+    # prefix to the destination prefix the app actually sees; see
+    # clients.transmission.normalize_path for the matching rules.
+    "path_prefix_map":       {"/downloads": "/share/downloads"},
 }
 
 SECRET_KEYS = {

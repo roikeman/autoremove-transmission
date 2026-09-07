@@ -625,8 +625,8 @@ async function loadCandidates() {
 // ── Scan (async, background-thread on the server) ──────────────────────────
 function scanProgressText(status) {
   const p = (status && status.progress) || {};
-  if (p.users_total) {
-    return `Scanning (${p.phase || "…"}): ${p.users_done || 0}/${p.users_total} users`;
+  if (p.total) {
+    return `Scanning (${p.phase || "…"}): ${p.done || 0}/${p.total}`;
   }
   return `Scanning${p.phase ? " (" + p.phase + ")" : ""}…`;
 }

@@ -459,6 +459,102 @@ def test_sweep_only_removes_torrents_matching_a_deleted_titles_files(tmp_path):
     assert tm.removed == [1]
 
 
+def test_prune_runs_after_successful_deletion_and_adds_to_bytes_freed(tmp_path):
+    show_dir = tmp_path / "share" / "Show"
+    show_dir.mkdir(parents=True)
+    (show_dir / "tvshow.nfo").write_bytes(b"x" * 200)
+
+    clients = _clients()
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")]}
+    candidate = _candidate(path=str(show_dir))
+    results = pipeline.execute([candidate], cfg, clients)
+
+    assert results[0]["status"] == "deleted"
+    assert not show_dir.exists()
+    # The nfo is excluded from the sonarr branch's pre-delete size snapshot
+    # (the arr's own delete call never actually frees it -- see
+    # _capture_inode_keys), so its 200 bytes are counted exactly once, by
+    # prune, not twice.
+    assert results[0]["bytes_freed"] == 200
+
+
+def test_prune_journals_pruned_files_and_bytes(tmp_path):
+    show_dir = tmp_path / "share" / "Show"
+    show_dir.mkdir(parents=True)
+    (show_dir / "tvshow.nfo").write_bytes(b"x" * 300)
+
+    clients = _clients()
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")]}
+    candidate = _candidate(path=str(show_dir))
+    pipeline.execute([candidate], cfg, clients)
+
+    entries = journal.read_recent()
+    prune_entries = [e for e in entries if e.get("kind") == "prune"]
+    assert prune_entries[0]["status"] == "ok"
+    assert prune_entries[0]["bytes_freed"] == 300
+    assert prune_entries[0]["files_pruned"] == 1
+
+
+def test_prune_does_not_run_when_owner_step_fails(tmp_path):
+    show_dir = tmp_path / "share" / "Show"
+    show_dir.mkdir(parents=True)
+    (show_dir / "tvshow.nfo").write_bytes(b"x" * 50)
+
+    class Boom(FakeArr):
+        def delete_item(self, item_id):
+            raise RuntimeError("sonarr down")
+
+    clients = _clients(sonarr=Boom())
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")]}
+    candidate = _candidate(path=str(show_dir))
+    results = pipeline.execute([candidate], cfg, clients)
+
+    assert results[0]["status"] == "failed"
+    assert show_dir.exists()
+    assert (show_dir / "tvshow.nfo").exists()
+
+
+def test_prune_does_not_run_when_jellyfin_step_fails(tmp_path):
+    show_dir = tmp_path / "share" / "Show"
+    show_dir.mkdir(parents=True)
+    (show_dir / "tvshow.nfo").write_bytes(b"x" * 50)
+
+    class Boom(FakeJellyfin):
+        def delete_item(self, item_id):
+            raise RuntimeError("jellyfin down")
+
+    clients = _clients(jellyfin=Boom())
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")]}
+    candidate = _candidate(path=str(show_dir))
+    results = pipeline.execute([candidate], cfg, clients)
+
+    assert results[0]["status"] == "partial"
+    assert show_dir.exists()
+    assert (show_dir / "tvshow.nfo").exists()
+
+
+def test_prune_exception_is_journaled_and_does_not_fail_the_run(tmp_path, monkeypatch):
+    show_dir = tmp_path / "share" / "Show"
+    show_dir.mkdir(parents=True)
+    (show_dir / "tvshow.nfo").write_bytes(b"x" * 10)
+
+    def boom(path, roots):
+        raise RuntimeError("disk error")
+
+    monkeypatch.setattr(pipeline, "prune_leftovers", boom)
+
+    clients = _clients()
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")]}
+    candidate = _candidate(path=str(show_dir))
+    results = pipeline.execute([candidate], cfg, clients)
+
+    assert results[0]["status"] == "deleted"
+    entries = journal.read_recent()
+    prune_entries = [e for e in entries if e.get("kind") == "prune"]
+    assert prune_entries[0]["status"] == "error"
+    assert "disk error" in prune_entries[0]["detail"]
+
+
 def test_owner_deletion_runs_before_sweep_real_hardlinks(tmp_path):
     lib_dir = tmp_path / "share" / "Movie"
     lib_dir.mkdir(parents=True)

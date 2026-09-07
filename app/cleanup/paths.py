@@ -27,22 +27,39 @@ def assert_within_roots(path, roots):
 
 
 def delete_file(path, roots):
-    """Delete one file inside the roots. Returns bytes freed (0 if absent)."""
-    safe = assert_within_roots(path, roots)
+    """Delete one file inside the roots. Returns bytes freed (0 if absent).
+
+    Operates on `path` itself via os.lstat/os.remove -- never on the
+    symlink-resolved form -- so that if `path` names a symlink, the link
+    node itself is what gets measured and removed, not whatever it points
+    at. This matters most for a dangling symlink (target doesn't exist):
+    os.stat follows the link and raises FileNotFoundError against the
+    *target*, which used to make this function report "nothing to delete"
+    while the link itself sat there un-removed, permanently blocking its
+    directory from ever emptying. It also means a symlink is credited its
+    own (tiny) size, never the target's.
+
+    assert_within_roots still resolves symlinks for the containment check
+    below -- a link pointing outside every configured root is still
+    rejected -- only the actual file-system operations changed to act on
+    the link itself rather than its resolved target.
+    """
+    assert_within_roots(path, roots)
+    target = os.path.normpath(path)
 
     try:
-        size = os.stat(safe).st_size
+        size = os.lstat(target).st_size
     except FileNotFoundError:
         return 0
 
-    os.remove(safe)
+    os.remove(target)
 
-    parent = os.path.dirname(safe)
+    parent = os.path.dirname(target)
     real_roots = {os.path.realpath(root) for root in roots or [] if root}
     try:
         if (
             os.path.isdir(parent)
-            and parent not in real_roots
+            and os.path.realpath(parent) not in real_roots
             and not os.listdir(parent)
         ):
             os.rmdir(parent)

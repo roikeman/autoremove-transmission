@@ -94,3 +94,31 @@ def test_empty_string_root_rejects_path_under_cwd(tmp_path, monkeypatch):
     target.write_bytes(b"x")
     with pytest.raises(PathOutsideRoots):
         assert_within_roots(str(target), [""])
+
+
+def test_delete_file_credits_symlinks_own_size_not_targets(tmp_path):
+    root = tmp_path
+    target = root / "big.mkv"
+    target.write_bytes(b"x" * 10_000)
+    link = root / "link.mkv"
+    os.symlink(str(target), str(link))
+    link_size = os.lstat(str(link)).st_size
+
+    freed = delete_file(str(link), [str(root)])
+
+    assert freed == link_size
+    assert freed != 10_000
+    assert not os.path.lexists(str(link))
+    assert target.exists()  # the target itself must never be touched
+
+
+def test_delete_file_removes_broken_symlink_and_empties_parent(tmp_path):
+    parent = tmp_path / "show"
+    parent.mkdir()
+    link = parent / "poster.jpg"
+    os.symlink(str(parent / "ghost.jpg"), str(link))
+
+    delete_file(str(link), [str(tmp_path)])
+
+    assert not os.path.lexists(str(link))
+    assert not parent.exists()  # emptied and pruned, just like a real file
