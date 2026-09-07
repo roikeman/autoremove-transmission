@@ -205,11 +205,9 @@ def _run_scan_job(cfg, lock_fd):
     -- success or failure -- which is what makes lock-held the source of
     truth for "a scan is actually running" (see _scan_lock_is_free).
     """
-    def on_progress(users_done, users_total, phase):
+    def on_progress(done, total, phase):
         current = _load_scan_status()
-        current["progress"] = {
-            "users_done": users_done, "users_total": users_total, "phase": phase,
-        }
+        current["progress"] = {"done": done, "total": total, "phase": phase}
         current["heartbeat"] = datetime.now().isoformat()
         _save_scan_status(current)
 
@@ -706,15 +704,21 @@ def _user_series_last_played(jf, user_id):
 def _scan(cfg, progress_cb=None):
     """Build the full candidate list. Merges user data across all Jellyfin users.
 
-    `progress_cb`, when given, is called as progress_cb(users_done,
-    users_total, phase) at cheap, honest checkpoints -- phase is one of
-    "sonarr" (building the owner index from Sonarr/Radarr), "jellyfin" (the
-    per-user Jellyfin round-trips, the bulk of the ~200s this takes on a
-    91-user server), or "hardlinks" (the final per-candidate stale/hardlink
-    pass). This is deliberately not a percentage: there is no cheap way to
-    know in advance how many candidates will survive the stale filter, so
-    callers wanting a fraction can compute users_done/users_total
-    themselves instead of this function inventing a number it can't back up.
+    `progress_cb`, when given, is called as progress_cb(done, total, phase)
+    at cheap, honest checkpoints -- a single counter over the WHOLE scan's
+    work, monotonically non-decreasing from 0 up to `total`, which never
+    changes once the scan starts. `total` accounts for every phase: the
+    Sonarr/Radarr owner-index build, BOTH per-user Jellyfin passes (see
+    below), and the final hardlinks pass -- so a caller polling this never
+    sees the counter drop, unlike the two-per-user-pass bug this replaced
+    (each pass used to report its own 0..total_users, so the second pass
+    restarted low and looked like the scan had gone backwards). `phase` is
+    a human-readable label naming what's happening right now: "sonarr",
+    "jellyfin-played" (the played-episodes pass), "jellyfin-items" (the
+    items-fetch/merge pass), or "hardlinks". This is deliberately not a
+    percentage of *candidates found*: there is no cheap way to know in
+    advance how many will survive the stale filter -- `done`/`total` is
+    only ever a fraction of scan *work*, never of results.
 
     Series episode counts and file sizes come from Sonarr's `statistics`
     object (episodeCount, sizeOnDisk) on the /api/v3/series response --
@@ -733,13 +737,24 @@ def _scan(cfg, progress_cb=None):
     """
     from datetime import datetime
 
-    def _report(users_done, users_total, phase):
-        if progress_cb:
-            progress_cb(users_done, users_total, phase)
-
     jf = JellyfinClient(cfg["jellyfin_url"], cfg["jellyfin_api_key"])
 
-    _report(0, 0, "sonarr")
+    # Users are fetched first (a cheap call) purely so total_units -- and
+    # therefore every progress report for the rest of this scan -- can be
+    # computed once and never change: 1 unit for the sonarr/radarr phase,
+    # one unit per user for EACH of the two per-user passes below, and 1
+    # unit for the final hardlinks pass.
+    users = jf.users()
+    total_users = len(users)
+    total_units = 2 * total_users + 2
+
+    done = 0
+
+    def _report(phase):
+        if progress_cb:
+            progress_cb(done, total_units, phase)
+
+    _report("sonarr")
     sonarr_items = []
     radarr_items = []
     if cfg.get("sonarr_url"):
@@ -749,10 +764,8 @@ def _scan(cfg, progress_cb=None):
     owner_index = cand.build_owner_index(sonarr_items, radarr_items)
     sonarr_by_id = cand.sonarr_stats_by_id(sonarr_items)
     radarr_by_id = cand.radarr_stats_by_id(radarr_items)
-
-    users = jf.users()
-    total_users = len(users)
-    _report(0, total_users, "jellyfin")
+    done += 1
+    _report("sonarr")
 
     # First pass: one played-episodes call per user. Collected up front (not
     # interleaved with the merge loop below) so the scan-wide reliability
@@ -761,16 +774,17 @@ def _scan(cfg, progress_cb=None):
     # loop must not leave earlier candidates under-flagged.
     series_last_played_by_user = {}
     any_unreliable = False
-    for i, user in enumerate(users):
+    for user in users:
         uid = user["Id"]
         per_series, reliable = _user_series_last_played(jf, uid)
         series_last_played_by_user[uid] = per_series
         if not reliable:
             any_unreliable = True
-        _report(i + 1, total_users, "jellyfin")
+        done += 1
+        _report("jellyfin-played")
 
     merged = {}
-    for i, user in enumerate(users):
+    for user in users:
         uid = user["Id"]
         series_last_played = series_last_played_by_user[uid]
         for item in jf.items(uid, "Series"):
@@ -789,9 +803,11 @@ def _scan(cfg, progress_cb=None):
             owner, owner_id = cand.match_owner(path, owner_index)
             size_bytes = cand.radarr_size(owner, owner_id, radarr_by_id)
             _merge(merged, cand.from_movie(item, owner_index, size_bytes=size_bytes))
-        _report(i + 1, total_users, "jellyfin")
+        done += 1
+        _report("jellyfin-items")
 
-    _report(total_users, total_users, "hardlinks")
+    done += 1
+    _report("hardlinks")
     now = datetime.now()
     age = int(cfg["age_days"])
     idle = int(cfg["idle_days"])
@@ -913,7 +929,7 @@ def api_start_scan():
     now = datetime.now().isoformat()
     status = {
         "state": "running", "started_at": now, "finished_at": None,
-        "progress": {"users_done": 0, "users_total": 0, "phase": "sonarr"},
+        "progress": {"done": 0, "total": 0, "phase": "sonarr"},
         "error": None, "heartbeat": now,
     }
     _save_scan_status(status)

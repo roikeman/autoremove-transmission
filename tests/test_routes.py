@@ -441,12 +441,15 @@ def test_scan_endpoint_reports_progress_and_heartbeat(client, monkeypatch):
     resp = client.post("/api/library/scan", json={})
     assert resp.status_code == 202
     body = resp.get_json()
-    assert body["progress"]["phase"] in ("sonarr", "jellyfin", "hardlinks")
+    assert body["progress"]["phase"] in (
+        "sonarr", "jellyfin-played", "jellyfin-items", "hardlinks")
     assert body["heartbeat"]
 
     status = _wait_for_scan_to_finish(client)
     assert status["state"] == "done"
     assert status["progress"] is not None
+    # The final report must reach its own declared total, never stop short.
+    assert status["progress"]["done"] == status["progress"]["total"]
     assert status["heartbeat"]
 
 
@@ -486,7 +489,7 @@ def test_scan_status_reports_running_while_lock_is_actually_held(client, monkeyp
 
     app_module._save_scan_status({
         "state": "running", "started_at": "2026-01-01T00:00:00", "finished_at": None,
-        "progress": {"users_done": 1, "users_total": 5, "phase": "jellyfin"},
+        "progress": {"done": 1, "total": 5, "phase": "jellyfin-played"},
         "error": None, "heartbeat": "2026-01-01T00:00:01",
     })
     lock_path = app_module._scan_lock_path()
@@ -509,7 +512,7 @@ def test_scan_status_reconciles_dead_worker_to_error(client, monkeypatch):
 
     app_module._save_scan_status({
         "state": "running", "started_at": "2026-01-01T00:00:00", "finished_at": None,
-        "progress": {"users_done": 1, "users_total": 5, "phase": "jellyfin"},
+        "progress": {"done": 1, "total": 5, "phase": "jellyfin-played"},
         "error": None, "heartbeat": "2026-01-01T00:00:01",
     })
 
