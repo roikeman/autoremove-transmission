@@ -147,6 +147,9 @@
       padding: .6rem 1rem; border-bottom: 1px solid var(--border);
       position: sticky; top: 0; z-index: 1; white-space: nowrap;
     }
+    thead th.sortable-header { cursor: pointer; user-select: none; transition: background .15s, color .15s; }
+    thead th.sortable-header:hover { background: rgba(255,255,255,0.06); color: #e8e8f0; }
+    thead th .sort-arrow { margin-left: .35em; color: var(--accent); font-size: .75rem; vertical-align: -1px; }
     tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
     tbody tr:last-child { border-bottom: none; }
     tbody tr:hover { background: rgba(255,255,255,0.03); }
@@ -278,11 +281,13 @@
   <div class="control-group">
     <label for="sortKey">Sort by</label>
     <select id="sortKey" onchange="onSortChange()">
-      <option value="size">Size</option>
       <option value="title">Title</option>
+      <option value="kind">Kind</option>
+      <option value="progress">Progress</option>
+      <option value="size">Size</option>
       <option value="added">Added</option>
       <option value="last_played">Last played</option>
-      <option value="progress">Progress</option>
+      <option value="owner">Owner</option>
     </select>
   </div>
   <button class="btn-refresh" id="sortDirBtn" onclick="toggleSortDir()" title="Toggle ascending/descending">
@@ -456,12 +461,49 @@ function toTimeOrNull(iso) {
   return isNaN(t) ? null : t;
 }
 
+// Tie-break used by the string comparators below -- when the primary field
+// is equal, order by title so identical values keep a consistent order
+// across re-renders instead of jittering (Array#sort is stable, but an
+// explicit fallback keeps the contract obvious and correct even if that
+// ever changes).
+function titleTiebreak(a, b) {
+  return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base", numeric: true });
+}
+
+// Kind is always present ("movie"/"series"), so no null handling is needed --
+// just a plain string compare with a stable fallback.
+function compareKind(a, b, dir) {
+  const av = a.kind === "series" ? "Series" : "Movie";
+  const bv = b.kind === "series" ? "Series" : "Movie";
+  const result = av.localeCompare(bv, undefined, { sensitivity: "base", numeric: true });
+  if (result !== 0) return dir === "desc" ? -result : result;
+  return titleTiebreak(a, b);
+}
+
+// Owner is frequently absent ("no *arr owner") -- mirrors
+// compareNullableNumeric's null-last-regardless-of-direction rule so an
+// unowned title doesn't jump to the top of an ascending sort.
+function compareOwner(a, b, dir) {
+  const aOwner = a.owner || null;
+  const bOwner = b.owner || null;
+  if (aOwner === null && bOwner === null) return titleTiebreak(a, b);
+  if (aOwner === null) return 1;
+  if (bOwner === null) return -1;
+  const result = aOwner.localeCompare(bOwner, undefined, { sensitivity: "base", numeric: true });
+  if (result !== 0) return dir === "desc" ? -result : result;
+  return titleTiebreak(a, b);
+}
+
 function compareCandidates(a, b, key, dir) {
   switch (key) {
     case "title": {
       const result = (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base", numeric: true });
       return dir === "desc" ? -result : result;
     }
+    case "kind":
+      return compareKind(a, b, dir);
+    case "owner":
+      return compareOwner(a, b, dir);
     case "added":
       return compareNullableNumeric(toTimeOrNull(a.added), toTimeOrNull(b.added), dir);
     case "last_played":
@@ -578,7 +620,21 @@ async function loadCandidates(forceRefresh) {
 }
 
 // ── Render bucket sections ──────────────────────────────────────────────────
+// Single source of truth for the dropdown + Asc/Desc button: called on every
+// render so header clicks, the dropdown, and the direction button can never
+// disagree about the active sort key/direction.
+function syncSortControls() {
+  const dropdown = document.getElementById("sortKey");
+  if (dropdown && dropdown.value !== _sortKey) dropdown.value = _sortKey;
+  const icon = document.getElementById("sortDirIcon");
+  const label = document.getElementById("sortDirLabel");
+  if (icon) icon.className = "bi " + (_sortDir === "desc" ? "bi-sort-numeric-down" : "bi-sort-numeric-up");
+  if (label) label.textContent = _sortDir === "desc" ? "Desc" : "Asc";
+}
+
 function renderSections() {
+  syncSortControls();
+
   const container = document.getElementById("sections");
   container.textContent = "";
 
@@ -615,10 +671,21 @@ function onSortChange() {
 
 function toggleSortDir() {
   _sortDir = _sortDir === "desc" ? "asc" : "desc";
-  const icon = document.getElementById("sortDirIcon");
-  const label = document.getElementById("sortDirLabel");
-  icon.className = "bi " + (_sortDir === "desc" ? "bi-sort-numeric-down" : "bi-sort-numeric-up");
-  label.textContent = _sortDir === "desc" ? "Desc" : "Asc";
+  renderSections(); // also syncs the dropdown + this button via syncSortControls()
+  updateSummary();
+}
+
+// Clicking a column header: same key toggles direction; a different key
+// switches to it using that column's sensible default direction. Reuses
+// the exact same renderSections()/updateSummary() path as the dropdown and
+// Asc/Desc button, so all three controls always agree.
+function onHeaderSort(key, defaultDir) {
+  if (_sortKey === key) {
+    _sortDir = _sortDir === "desc" ? "asc" : "desc";
+  } else {
+    _sortKey = key;
+    _sortDir = defaultDir;
+  }
   renderSections();
   updateSummary();
 }
@@ -677,16 +744,22 @@ function buildSection(bucket, items) {
   return section;
 }
 
+// `key` matches a _sortKey value (and a compareCandidates case) -- present
+// only on columns that are sortable. `defaultDir` is the direction applied
+// the first time a column is clicked (i.e. when switching to it from a
+// different column): descending ("largest"/"newest" first) for the
+// magnitude columns, ascending (alphabetical) for the text columns.
+// Checkbox and Flags have neither and are not clickable.
 const TABLE_COLUMNS = [
   { text: "",            width: "36px"  },
-  { text: "Title" },
-  { text: "Kind",        width: "70px"  },
-  { text: "Progress",    width: "110px" },
+  { text: "Title",       key: "title",       defaultDir: "asc"  },
+  { text: "Kind",        width: "70px",  key: "kind",        defaultDir: "asc"  },
+  { text: "Progress",    width: "110px", key: "progress",    defaultDir: "desc" },
   { text: "Viewers",     width: "130px" },
-  { text: "Size",        width: "100px" },
-  { text: "Added",       width: "110px" },
-  { text: "Last played", width: "110px" },
-  { text: "Owner",       width: "120px" },
+  { text: "Size",        width: "100px", key: "size",        defaultDir: "desc" },
+  { text: "Added",       width: "110px", key: "added",       defaultDir: "desc" },
+  { text: "Last played", width: "110px", key: "last_played", defaultDir: "desc" },
+  { text: "Owner",       width: "120px", key: "owner",       defaultDir: "asc"  },
   { text: "Flags" },
 ];
 
@@ -696,8 +769,21 @@ function buildTable(bucket, items) {
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
   TABLE_COLUMNS.forEach(col => {
-    const th = el("th", { text: col.text });
+    const th = document.createElement("th");
     if (col.width) th.style.width = col.width;
+    if (col.key) {
+      th.classList.add("sortable-header");
+      th.title = "Sort by " + col.text;
+      th.appendChild(document.createTextNode(col.text));
+      if (_sortKey === col.key) {
+        th.appendChild(icon(
+          "bi " + (_sortDir === "desc" ? "bi-caret-down-fill" : "bi-caret-up-fill") + " sort-arrow"
+        ));
+      }
+      th.addEventListener("click", () => onHeaderSort(col.key, col.defaultDir));
+    } else {
+      th.textContent = col.text;
+    }
     headRow.appendChild(th);
   });
   thead.appendChild(headRow);
