@@ -293,9 +293,10 @@
   <button class="btn-refresh" id="sortDirBtn" onclick="toggleSortDir()" title="Toggle ascending/descending">
     <i class="bi bi-sort-numeric-down" id="sortDirIcon"></i> <span id="sortDirLabel">Desc</span>
   </button>
-  <button class="btn-refresh" id="rescanBtn" onclick="loadCandidates(true)">
-    <i class="bi bi-arrow-clockwise" id="rescanIcon"></i> Rescan
+  <button class="btn-refresh" id="rescanBtn" onclick="startScan()">
+    <i class="bi bi-arrow-clockwise" id="rescanIcon"></i> <span id="rescanLabel">Rescan</span>
   </button>
+  <span class="stat-label" id="scanProgressLabel" style="align-self:center"></span>
   <span class="stat-label" id="lastScannedLabel" style="align-self:center"></span>
   <button class="btn-refresh" id="journalToggleBtn" onclick="toggleJournal()" style="margin-left:auto">
     <i class="bi bi-journal-text"></i> Journal
@@ -320,9 +321,14 @@
         <span class="stat-value" id="reclaimSize" style="color:#a89df9">—</span>
       </div>
     </div>
-    <button class="btn-preflight" id="preflightBtn" onclick="runPreflight()" disabled>
-      <i class="bi bi-clipboard-check" id="preflightIcon"></i> Preflight
-    </button>
+    <div style="display:flex;align-items:center;gap:.6rem">
+      <span class="stat-label" id="preflightScanHint" style="display:none">
+        Blocked while a scan is running
+      </span>
+      <button class="btn-preflight" id="preflightBtn" onclick="runPreflight()" disabled>
+        <i class="bi bi-clipboard-check" id="preflightIcon"></i> Preflight
+      </button>
+    </div>
   </div>
   <div class="alert-warn" id="reclaimWarn">
     <i class="bi bi-exclamation-triangle-fill"></i>
@@ -394,6 +400,15 @@ let _executing      = false;
 let _modal          = null;
 let _journalOpen     = false;
 let _journalLoaded    = false;
+let _scanRequired    = false; // true when GET /candidates says no cache exists yet
+
+// Async scan (Rescan is now POST /api/library/scan + poll, never an inline
+// synchronous scan) -- see startScan()/pollScanStatus() below. The table,
+// sorting and selection stay fully usable while _scanning is true; only
+// Preflight is blocked (with an on-screen reason), and the Rescan button
+// itself is disabled to avoid piling up redundant 409s.
+let _scanning       = false;
+let _scanPollTimer  = null;
 
 // A slow backend call (e.g. a multi-minute Jellyfin library scan across
 // many users) can be killed by a browser or reverse-proxy timeout before
@@ -557,33 +572,22 @@ function statItem(label, value, valueClassName) {
 }
 
 // ── Load candidates ──────────────────────────────────────────────────────────
-// forceRefresh: true for the explicit "Rescan" control, which must always
-// hit Jellyfin again rather than silently reusing a possibly-stale cache.
-async function loadCandidates(forceRefresh) {
+// Always serves whatever the server has cached -- this never triggers a
+// scan and never blocks (see /api/library/candidates). Populating or
+// refreshing the cache is the separate startScan() flow below.
+async function loadCandidates() {
   const errorBox = document.getElementById("errorBox");
-  const icon     = document.getElementById("rescanIcon");
-  const btn      = document.getElementById("rescanBtn");
   const scanInfo = document.getElementById("lastScannedLabel");
 
-  icon.classList.add("spin");
-  btn.disabled = true;
-  errorBox.style.display = "none";
-
-  const age  = document.getElementById("ageDays").value.trim();
-  const idle = document.getElementById("idleDays").value.trim();
-  const params = new URLSearchParams();
-  if (age)  params.set("age_days", age);
-  if (idle) params.set("idle_days", idle);
-  if (forceRefresh) params.set("refresh", "1");
-
   try {
-    const resp = await fetch("/api/library/candidates?" + params.toString());
+    const resp = await fetch("/api/library/candidates");
     const data = await parseJsonResponse(resp);
     if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
 
-    _candidates = data.candidates || [];
-    _preticked  = data.preticked || [];
-    _labels     = data.labels || {};
+    _candidates   = data.candidates || [];
+    _preticked    = data.preticked || [];
+    _labels       = data.labels || {};
+    _scanRequired = !!data.scan_required;
     document.getElementById("ageDays").value  = data.age_days;
     document.getElementById("idleDays").value = data.idle_days;
 
@@ -605,17 +609,155 @@ async function loadCandidates(forceRefresh) {
     _lastPlanIds = null;
     _lastPlanResult = null;
 
+    errorBox.style.display = "none";
     renderSections();
     updateSummary();
   } catch (err) {
     errorBox.textContent = "Error: " + err.message;
     errorBox.style.display = "block";
     _candidates = [];
+    _scanRequired = false;
     document.getElementById("sections").textContent = "";
     updateSummary();
-  } finally {
-    icon.classList.remove("spin");
-    btn.disabled = false;
+  }
+}
+
+// ── Scan (async, background-thread on the server) ──────────────────────────
+function scanProgressText(status) {
+  const p = (status && status.progress) || {};
+  if (p.users_total) {
+    return `Scanning (${p.phase || "…"}): ${p.users_done || 0}/${p.users_total} users`;
+  }
+  return `Scanning${p.phase ? " (" + p.phase + ")" : ""}…`;
+}
+
+// Single place that reflects "is a scan in flight" into every part of the
+// UI that cares -- the Rescan button/icon/label, the progress text, and
+// (via updateSummary) whether Preflight is blocked. Never touches the
+// candidates table, sorting or selection -- those stay fully usable while
+// a scan runs.
+function setScanningUI(isScanning, status) {
+  _scanning = isScanning;
+
+  const btn   = document.getElementById("rescanBtn");
+  const icon  = document.getElementById("rescanIcon");
+  const label = document.getElementById("rescanLabel");
+  const prog  = document.getElementById("scanProgressLabel");
+  const hint  = document.getElementById("preflightScanHint");
+
+  btn.disabled = isScanning;
+  icon.classList.toggle("spin", isScanning);
+  label.textContent = isScanning ? "Scanning…" : "Rescan";
+  if (prog) prog.textContent = isScanning ? scanProgressText(status) : "";
+  if (hint) hint.style.display = isScanning ? "inline" : "none";
+
+  updateSummary(); // recomputes preflightBtn.disabled, factoring in _scanning
+}
+
+function stopScanPolling() {
+  if (_scanPollTimer) {
+    clearInterval(_scanPollTimer);
+    _scanPollTimer = null;
+  }
+}
+
+async function checkScanStatusOnce() {
+  const errorBox = document.getElementById("errorBox");
+  try {
+    const resp = await fetch("/api/library/scan/status");
+    const data = await parseJsonResponse(resp);
+
+    if (data.state === "running") {
+      setScanningUI(true, data);
+      return;
+    }
+
+    stopScanPolling();
+    setScanningUI(false, data);
+
+    if (data.state === "error") {
+      errorBox.textContent = "Scan error: " + (data.error || "unknown error");
+      errorBox.style.display = "block";
+      return;
+    }
+
+    if (data.state === "done") {
+      await loadCandidates();
+    }
+  } catch (err) {
+    // A transient network hiccup while polling must not spuriously report
+    // the scan as failed -- just try again on the next tick.
+  }
+}
+
+function pollScanStatus() {
+  if (_scanPollTimer) return;
+  _scanPollTimer = setInterval(checkScanStatusOnce, 3000);
+}
+
+// Triggered by the Rescan button and by the "Run a scan" empty-state
+// prompt. POSTs to start a background scan, then polls status a few
+// seconds apart until it reaches done/error -- never blocks the page.
+async function startScan() {
+  if (_scanning) return;
+  const errorBox = document.getElementById("errorBox");
+  errorBox.style.display = "none";
+
+  const age  = document.getElementById("ageDays").value.trim();
+  const idle = document.getElementById("idleDays").value.trim();
+  const body = {};
+  if (age)  body.age_days  = age;
+  if (idle) body.idle_days = idle;
+
+  try {
+    const resp = await fetch("/api/library/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await parseJsonResponse(resp);
+
+    if (resp.status === 202) {
+      setScanningUI(true, data);
+      pollScanStatus();
+      return;
+    }
+    if (resp.status === 409) {
+      // Either a scan is already running (this or another worker) or one
+      // just died and got reconciled to "error" -- either way, this IS
+      // the current truth. A live scan gets picked up by the poller
+      // rather than treated as a hard failure.
+      if (data.state === "running") {
+        setScanningUI(true, data);
+        pollScanStatus();
+      } else {
+        errorBox.textContent = "Error: " + (data.error || "a scan could not be started");
+        errorBox.style.display = "block";
+      }
+      return;
+    }
+    throw new Error(data.error || `HTTP ${resp.status}`);
+  } catch (err) {
+    errorBox.textContent = "Error: " + err.message;
+    errorBox.style.display = "block";
+  }
+}
+
+// Called once on page load so a scan already running (started from another
+// tab, or before this page was last reloaded) is picked up and reflected in
+// the UI instead of silently ignored until the user clicks Rescan again.
+async function refreshScanStatusOnLoad() {
+  try {
+    const resp = await fetch("/api/library/scan/status");
+    const data = await parseJsonResponse(resp);
+    if (data.state === "running") {
+      setScanningUI(true, data);
+      pollScanStatus();
+    } else {
+      setScanningUI(false, data);
+    }
+  } catch (err) {
+    // Best effort only -- loadCandidates() already ran independently.
   }
 }
 
@@ -649,8 +791,21 @@ function renderSections() {
 
   if (_candidates.length === 0) {
     const empty = el("div", { className: "empty-state" });
-    empty.appendChild(icon("bi bi-check-circle"));
-    empty.appendChild(document.createTextNode("No stale titles found."));
+    if (_scanRequired) {
+      empty.appendChild(icon("bi bi-search"));
+      empty.appendChild(document.createElement("br"));
+      empty.appendChild(document.createTextNode("No scan has been run yet -- run one to find candidates."));
+      empty.appendChild(document.createElement("br"));
+      const runBtn = el("button", { className: "btn-refresh" });
+      runBtn.style.marginTop = ".85rem";
+      runBtn.disabled = _scanning;
+      setIconLabel(runBtn, "bi bi-play-fill", _scanning ? "Scanning…" : "Run a scan");
+      runBtn.addEventListener("click", startScan);
+      empty.appendChild(runBtn);
+    } else {
+      empty.appendChild(icon("bi bi-check-circle"));
+      empty.appendChild(document.createTextNode("No stale titles found."));
+    }
     container.appendChild(empty);
     return;
   }
@@ -921,7 +1076,10 @@ function updateSummary() {
   const hasFreeLessFlag = !confirmed && selected.some(c => (c.flags || []).includes("frees-less-than-listed"));
   warnEl.style.display = hasFreeLessFlag ? "block" : "none";
 
-  document.getElementById("preflightBtn").disabled = selected.length === 0;
+  // Preflight is blocked while a scan is running -- see setScanningUI(),
+  // which shows the reason via #preflightScanHint. Nothing else here
+  // (table, sorting, selection) is ever disabled for that reason.
+  document.getElementById("preflightBtn").disabled = selected.length === 0 || _scanning;
 
   updateSelectAllControls();
 }
@@ -979,6 +1137,12 @@ function selectAllGlobal(select) {
 // ── Preflight ────────────────────────────────────────────────────────────────
 async function runPreflight() {
   if (_checked.size === 0) return;
+  if (_scanning) {
+    const errorBox = document.getElementById("errorBox");
+    errorBox.textContent = "Preflight is blocked while a scan is running -- wait for it to finish, then try again.";
+    errorBox.style.display = "block";
+    return;
+  }
   const btn  = document.getElementById("preflightBtn");
   const icon = document.getElementById("preflightIcon");
   const errorBox = document.getElementById("errorBox");
@@ -1052,6 +1216,12 @@ async function executeDelete() {
   // inside the modal, which is only ever opened from a successful /plan
   // response, and it always sends exactly the ids that plan covered.
   if (!_lastPlanIds || _executing) return;
+  if (_scanning) {
+    const errEl = document.getElementById("modalError");
+    errEl.textContent = "Delete is blocked while a scan is running -- wait for it to finish, then re-run Preflight.";
+    errEl.style.display = "block";
+    return;
+  }
 
   const btn   = document.getElementById("confirmDeleteBtn");
   const errEl = document.getElementById("modalError");
@@ -1184,9 +1354,20 @@ function buildJournalEntry(entry) {
 
   // Not every journal entry describes a completed title. The Transmission
   // sweep writes its own summary entry (kind: "transmission_sweep", no
-  // "title" key), and each destructive step now also writes its own
-  // immediate record (kind: "step") in addition to the title-completion
-  // entry (kind: "title") -- so a mid-title crash still leaves a trace.
+  // "title" key), the post-run Jellyfin library refresh writes its own
+  // (kind: "jellyfin_refresh", also no "title" key -- see
+  // _refresh_jellyfin_after_execute), and each destructive step now also
+  // writes its own immediate record (kind: "step") in addition to the
+  // title-completion entry (kind: "title") -- so a mid-title crash still
+  // leaves a trace.
+  if (entry.kind === "jellyfin_refresh") {
+    const detail = entry.status === "error"
+      ? `Jellyfin library refresh failed: ${entry.detail || ""}`
+      : "Jellyfin library refresh — ok";
+    row.appendChild(el("div", { text: detail }));
+    return row;
+  }
+
   if (entry.kind === "transmission_sweep" || !("title" in entry)) {
     const detail = entry.status === "error"
       ? `Transmission sweep failed: ${entry.detail || ""}`
@@ -1232,6 +1413,7 @@ document.getElementById("globalSelectAll").addEventListener("change", function (
 });
 
 loadCandidates();
+refreshScanStatusOnLoad();
 </script>
 </body>
 </html>
