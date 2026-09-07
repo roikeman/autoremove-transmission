@@ -363,17 +363,40 @@ def prune_leftovers(path, roots):
     behind, an unrelated .txt, a file with no extension at all) means hands
     off the entire tree, every file in it, untouched.
 
-    Deletion itself is delegated entirely to _delete_tree()/delete_file()
-    -- once every file under `path` is confirmed prunable, this is exactly
-    the same "delete every file, then rmdir emptied directories, but never
-    a configured root" behaviour _delete_tree already provides and is
-    already tested for (test_delete_tree_never_rmdirs_a_configured_root).
-    Reusing it here means a configured library root can never be removed
-    by pruning either, without reimplementing that guard.
+    CRITICAL: this function does NOT delegate to _delete_tree(). That
+    function performs its own, independent os.walk at deletion time with no
+    extension re-validation, which is a check-then-act race: anything that
+    appears under `path` between the validating walk above and that second
+    walk -- a concurrent Sonarr import, an in-flight transcode, a manual
+    copy -- would be deleted unconditionally, whatever its type, defeating
+    the fail-safe rule entirely. Instead, the validating walk below COLLECTS
+    the concrete file paths it approves, and only those exact paths are ever
+    deleted -- nothing discovered by any later directory listing. Each path
+    is also re-checked against PRUNABLE_EXTENSIONS immediately before it is
+    actually deleted (belt and braces: the collected list plus a per-file
+    check at the moment of deletion); a path that no longer validates is
+    skipped, not deleted. A symlink is deleted via delete_file(), which
+    operates on the link node itself and never follows it -- so a symlink
+    only ever qualifies here by its own name's extension, exactly like any
+    other file, and its target is neither inspected nor touched.
 
-    Returns (bytes_freed, files_pruned). Both are 0 for a path that no
-    longer exists, that resolves outside every configured root, or that
-    fails the fail-safe check above.
+    Every file in the approved list is deleted independently: since each
+    one was individually re-validated as prunable right before its own
+    deletion, a failure partway through can only ever leave *prunable*
+    files behind (never anything the fail-safe rule above wouldn't already
+    have screened out) -- so a per-file error is caught, journaled by the
+    caller via the truthful files_pruned count returned below, and pruning
+    continues for the rest rather than aborting. Directories are then
+    removed deepest-first, but only if empty, and never a configured
+    library root -- the same guard _delete_tree already relies on
+    (test_delete_tree_never_rmdirs_a_configured_root), reimplemented here
+    directly since this function no longer calls _delete_tree.
+
+    Returns (bytes_freed, files_pruned) -- files_pruned is the count
+    actually removed, which can be less than the number originally
+    approved if a re-check or a delete_file call failed for some of them.
+    Both are 0 for a path that no longer exists, that resolves outside
+    every configured root, or that fails the fail-safe check above.
     """
     try:
         safe = assert_within_roots(path, roots)
@@ -384,7 +407,9 @@ def prune_leftovers(path, roots):
         return 0, 0
 
     leftover_files = []
+    walked_dirs = []
     for dirpath, _dirs, names in os.walk(safe):
+        walked_dirs.append(dirpath)
         leftover_files.extend(os.path.join(dirpath, name) for name in names)
 
     if not leftover_files:
@@ -392,8 +417,34 @@ def prune_leftovers(path, roots):
     if not all(_is_prunable(f) for f in leftover_files):
         return 0, 0
 
-    freed = _delete_tree(safe, roots)
-    return freed, len(leftover_files)
+    freed = 0
+    pruned = 0
+    for file_path in leftover_files:
+        if not _is_prunable(file_path):
+            # Re-checked immediately before deletion and no longer
+            # validates -- something changed it since the approval walk
+            # above. Skip it; never delete a path this check doesn't
+            # positively re-confirm right now.
+            continue
+        try:
+            freed += delete_file(file_path, roots)
+        except Exception:
+            # Every path reaching here was just re-validated as prunable,
+            # so this can only ever leave a still-prunable file behind.
+            # Keep going for the rest rather than aborting the whole prune.
+            continue
+        pruned += 1
+
+    real_roots = {os.path.realpath(root) for root in roots or [] if root}
+    for dirpath in reversed(walked_dirs):
+        if os.path.realpath(dirpath) in real_roots:
+            continue
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
+
+    return freed, pruned
 
 
 def _torrent_inode_keys(torrent):
