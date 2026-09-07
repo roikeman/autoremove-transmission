@@ -540,6 +540,55 @@ def _build_clients(cfg):
     )
 
 
+def _user_series_last_played(jf, user_id):
+    """One extra call per user: every episode this user has played, folded
+    down to that user's most-recent play per series (SeriesId -> datetime).
+
+    Jellyfin populates UserData.LastPlayedDate on the Episode item, never on
+    the Series item, so this is how a series' last-played date gets derived
+    at all -- without reintroducing the per-series-per-user fan-out (91
+    users x ~75 series) that was removed from _scan for performance. This is
+    +1 call per user, same order as the two calls per user already made.
+
+    Returns (series_id -> datetime, reliable). `reliable` is False when the
+    call raised, or when the response is non-empty but not one single item
+    carries a "SeriesId" key at all -- i.e. this Jellyfin version doesn't
+    return it for this query shape, so there is no way to attribute any of
+    these plays to a series. Callers must then treat "no play found this
+    scan" for every series as UNKNOWN, not "never played" -- that
+    misattribution is exactly the bug this function exists to fix.
+
+    Deliberately does not trust SortBy=DatePlayed / Filters=IsPlayed being
+    honoured: every returned episode is inspected and the max date per
+    series is kept (not "first occurrence in a descending list"), and an
+    unplayed episode slipping through the filter simply has no parseable
+    LastPlayedDate and is skipped -- so a sort/filter quirk in some Jellyfin
+    version degrades silently to "did nothing" rather than a wrong date.
+    """
+    try:
+        episodes = jf.played_episodes(user_id)
+    except Exception:
+        return {}, False
+
+    if not episodes:
+        return {}, True
+
+    if not any("SeriesId" in ep for ep in episodes):
+        return {}, False
+
+    per_series = {}
+    for ep in episodes:
+        sid = ep.get("SeriesId")
+        if not sid:
+            continue
+        played = cand.parse_dt((ep.get("UserData") or {}).get("LastPlayedDate"))
+        if played is None:
+            continue
+        if sid not in per_series or played > per_series[sid]:
+            per_series[sid] = played
+    return per_series, True
+
+
 def _scan(cfg):
     """Build the full candidate list. Merges user data across all Jellyfin users.
 
@@ -552,6 +601,11 @@ def _scan(cfg):
     in hand, at zero extra API calls. `JellyfinClient.episodes()` stays
     available on the client for callers that still want it -- it is simply
     no longer called from here.
+
+    A series' last-played date is a separate problem from its episode count:
+    Jellyfin never populates UserData.LastPlayedDate on the Series item
+    itself (only on the Episode), so it is derived from
+    _user_series_last_played -- one extra call per user, not per series.
     """
     from datetime import datetime
 
@@ -569,14 +623,35 @@ def _scan(cfg):
 
     users = jf.users()
 
+    # First pass: one played-episodes call per user. Collected up front (not
+    # interleaved with the merge loop below) so the scan-wide reliability
+    # verdict is fully known -- any_unreliable -- before it is applied to a
+    # single candidate; a user whose call fails partway through the merge
+    # loop must not leave earlier candidates under-flagged.
+    series_last_played_by_user = {}
+    any_unreliable = False
+    for user in users:
+        uid = user["Id"]
+        per_series, reliable = _user_series_last_played(jf, uid)
+        series_last_played_by_user[uid] = per_series
+        if not reliable:
+            any_unreliable = True
+
     merged = {}
     for user in users:
         uid = user["Id"]
+        series_last_played = series_last_played_by_user[uid]
         for item in jf.items(uid, "Series"):
             path = item.get("Path") or ""
             owner, owner_id = cand.match_owner(path, owner_index)
             episodes, size_bytes = cand.sonarr_stats(owner, owner_id, sonarr_by_id)
-            _merge(merged, cand.from_series(item, owner_index, episodes=episodes, size_bytes=size_bytes))
+            episode_last_played = series_last_played.get(item.get("Id"))
+            _merge(
+                merged,
+                cand.from_series(item, owner_index, episodes=episodes,
+                                  size_bytes=size_bytes, last_played=episode_last_played),
+                last_played_unreliable=any_unreliable,
+            )
         for item in jf.items(uid, "Movie"):
             path = item.get("Path") or ""
             owner, owner_id = cand.match_owner(path, owner_index)
@@ -607,7 +682,7 @@ def _scan(cfg):
     return result
 
 
-def _merge(store, candidate):
+def _merge(store, candidate, last_played_unreliable=False):
     """Keep the most-watched, most-recently-played view across users, and
     accumulate the per-user viewer breakdown (users_finished/started/dropped)
     behind the compact "12 finished / 3 started / 76 never opened" UI column
@@ -619,6 +694,19 @@ def _merge(store, candidate):
     must survive every merge -- with up to 91 users, losing them on the
     second merge would silently defeat the "never pre-tick on unknown data"
     guarantee the flag exists to uphold.
+
+    `last_played_unreliable` is the scan-wide verdict from
+    _user_series_last_played: at least one user's played-episode lookup
+    failed or came back unusable this scan. It only matters for a series
+    that STILL has no last_played after folding in every user seen so far --
+    a series with a real, known last_played is safe regardless of what a
+    failed lookup elsewhere might be hiding (missing data can only mean an
+    even more recent, i.e. even less stale, play was missed -- never a
+    reason to treat a known date as wrong). This flag is therefore
+    recomputed on every merge (including the first), not carried forward
+    blindly like the manually-set unavailable flags: unlike those, whether
+    it applies depends on existing.last_played, which can change on any
+    given merge as later users are folded in.
     """
     verdict = cand.classify_viewer(
         candidate.kind, candidate.episodes, candidate.watched, candidate.last_played)
@@ -638,10 +726,12 @@ def _merge(store, candidate):
             existing.kind, existing.episodes, existing.watched,
             existing.last_played, existing.progress_pct)
 
-        auto_flags = {"added-date-unreliable", "frees-less-than-listed"}
-        extra_flags = [f for f in existing.flags if f not in auto_flags]
-        existing.flags = buckets.quality_flags(existing.added, existing.last_played, False) + extra_flags
-        existing.bucket = cand.guard_unavailable_bucket(existing.bucket, existing.flags)
+    auto_flags = {"added-date-unreliable", "frees-less-than-listed", "last-played-unavailable"}
+    extra_flags = [f for f in existing.flags if f not in auto_flags]
+    existing.flags = buckets.quality_flags(existing.added, existing.last_played, False) + extra_flags
+    if existing.kind == "series" and existing.last_played is None and last_played_unreliable:
+        existing.flags.append("last-played-unavailable")
+    existing.bucket = cand.guard_unavailable_bucket(existing.bucket, existing.flags)
 
     if verdict == "finished":
         existing.users_finished += 1

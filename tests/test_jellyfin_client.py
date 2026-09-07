@@ -73,3 +73,33 @@ def test_refresh_library_posts(client):
 
 def test_base_url_trailing_slash_is_normalized():
     assert JellyfinClient(BASE + "/", "k").base_url == BASE
+
+
+@responses.activate
+def test_played_episodes_requests_one_call_with_expected_params(client):
+    responses.add(responses.GET, f"{BASE}/Users/u1/Items",
+                  json={"Items": [{"Id": "e1", "SeriesId": "s1"}]}, status=200)
+    items = client.played_episodes("u1")
+    assert items == [{"Id": "e1", "SeriesId": "s1"}]
+    qs = responses.calls[0].request.url
+    assert "IncludeItemTypes=Episode" in qs
+    assert "Recursive=true" in qs
+    assert "Filters=IsPlayed" in qs
+    assert "SortBy=DatePlayed" in qs
+    assert "SortOrder=Descending" in qs
+    assert "SeriesId" in qs
+    assert "Limit=2000" in qs
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_played_episodes_returns_empty_list_when_absent(client):
+    responses.add(responses.GET, f"{BASE}/Users/u1/Items", json={}, status=200)
+    assert client.played_episodes("u1") == []
+
+
+@responses.activate
+def test_played_episodes_respects_custom_limit(client):
+    responses.add(responses.GET, f"{BASE}/Users/u1/Items", json={"Items": []}, status=200)
+    client.played_episodes("u1", limit=50)
+    assert "Limit=50" in responses.calls[0].request.url

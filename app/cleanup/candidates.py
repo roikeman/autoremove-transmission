@@ -218,10 +218,17 @@ def guard_unavailable_bucket(bucket, flags):
           particular user's watched count is missing. Bucket A only
           requires last_played to be genuinely absent, which doesn't
           depend on the watched count being accurate, so it's exempt.
+      last-played-unavailable: the per-user played-episode lookup that
+          derives a series' last-played date (Jellyfin never populates it on
+          the Series item itself) failed or came back unusable this scan,
+          AND no play event could be established from any other source
+          either. That combination means "never played" cannot be trusted
+          -- the missing lookup could be hiding a recent play -- so, same as
+          episode-data-unavailable, bucket A gets no exemption here either.
     """
     if bucket not in buckets.PRETICKED:
         return bucket
-    if "episode-data-unavailable" in flags:
+    if "episode-data-unavailable" in flags or "last-played-unavailable" in flags:
         return buckets.MID_WATCH
     if "watch-count-unavailable" in flags and bucket != buckets.NEVER_OPENED:
         return buckets.MID_WATCH
@@ -256,7 +263,17 @@ def classify_viewer(kind, episodes, watched, last_played):
     return "never_opened"
 
 
-def from_series(item, owner_index, episodes=None, watched=None, size_bytes=None):
+def from_series(item, owner_index, episodes=None, watched=None, size_bytes=None,
+                 last_played=None):
+    """`last_played` (when given) is the series' last-played date derived by
+    the caller from per-user episode playback -- Jellyfin populates
+    UserData.LastPlayedDate on the Episode item, never on the Series item,
+    so the Series payload's own field (read below into
+    `series_level_last_played`) is expected to always be None on real
+    Jellyfin. It is still read and folded in defensively (whichever of the
+    two is later wins) in case some Jellyfin version ever does populate it,
+    rather than the caller's value silently overriding a real signal.
+    """
     user = item.get("UserData") or {}
 
     # `episodes` (when given) is the real count from Sonarr's `statistics`
@@ -292,7 +309,10 @@ def from_series(item, owner_index, episodes=None, watched=None, size_bytes=None)
             watched = 0
 
     added = parse_dt(item.get("DateLastMediaAdded")) or parse_dt(item.get("DateCreated"))
-    last_played = parse_dt(user.get("LastPlayedDate"))
+    series_level_last_played = parse_dt(user.get("LastPlayedDate"))
+    if series_level_last_played is not None and (
+            last_played is None or series_level_last_played > last_played):
+        last_played = series_level_last_played
     path = item.get("Path") or ""
     owner, owner_id = match_owner(path, owner_index)
     size = size_bytes if size_bytes is not None else _size_of(item)
