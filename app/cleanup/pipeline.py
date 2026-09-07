@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from cleanup import journal
 from cleanup.paths import assert_within_roots, delete_file, PathOutsideRoots
+from clients.transmission import normalize_path
 
 
 class BlastRadiusExceeded(Exception):
@@ -447,9 +448,16 @@ def prune_leftovers(path, roots):
     return freed, pruned
 
 
-def _torrent_inode_keys(torrent):
-    """The {(st_dev, st_ino)} set for a torrent's on-disk files."""
-    download_dir = torrent.get("downloadDir", "")
+def _torrent_inode_keys(torrent, cfg=None):
+    """The {(st_dev, st_ino)} set for a torrent's on-disk files.
+
+    downloadDir is normalized through clients.transmission.normalize_path
+    first -- Transmission may report it under a mount prefix (e.g.
+    /downloads) that doesn't match the prefix this app sees on disk
+    (/share/downloads), which would otherwise make every stat below fail
+    and silently drop the torrent's files out of the inode-key set.
+    """
+    download_dir = normalize_path(torrent.get("downloadDir", ""), cfg)
     keys = set()
     for file_entry in torrent.get("files", []) or []:
         name = file_entry.get("name") or ""
@@ -490,7 +498,7 @@ def _sweep_torrents(cfg, clients, inode_keys):
     for torrent in clients.transmission.get_all_torrents():
         if not clients.transmission.is_deletable(torrent):
             continue
-        if not (inode_keys & _torrent_inode_keys(torrent)):
+        if not (inode_keys & _torrent_inode_keys(torrent, cfg)):
             continue
         if cfg.get("seed_guard") and should_keep_seeding(torrent, session_limit, min_seed_seconds):
             kept += 1

@@ -512,24 +512,46 @@ def delete_torrent(torrent_id):
 def _get_known_download_dirs():
     try:
         torrents = get_all_torrents()
-        return {t.get("downloadDir", "") for t in torrents if t.get("downloadDir")}
+        cfg = _cfg()
+        return {tx.normalize_path(t.get("downloadDir", ""), cfg)
+                for t in torrents if t.get("downloadDir")}
     except Exception:
         return set()
 
 
+def _collapse_nested_scan_dirs(dirs):
+    """Drop any directory that is itself contained within another
+    directory being scanned, e.g. /share/downloads/complete/radarr is
+    dropped when /share/downloads/complete is also a scan dir -- os.walk
+    on the parent already visits it. Matched on path-segment boundaries
+    (not raw startswith), so /share/downloads-extra is never treated as
+    contained in /share/downloads.
+    """
+    normed = sorted({os.path.normpath(d) for d in dirs if d}, key=len)
+    kept = []
+    for d in normed:
+        if any(d == k or d.startswith(k + os.sep) for k in kept):
+            continue
+        kept.append(d)
+    return kept
+
+
 def get_orphan_files():
     torrents = get_all_torrents()
+    cfg = _cfg()
 
     torrent_files = set()
-    download_dirs = set()
+    raw_dirs = set()
     for t in torrents:
-        dl_dir = t.get("downloadDir", "")
+        dl_dir = tx.normalize_path(t.get("downloadDir", ""), cfg)
         if dl_dir:
-            download_dirs.add(dl_dir)
+            raw_dirs.add(dl_dir)
         for f in t.get("files", []):
             torrent_files.add(os.path.normpath(os.path.join(dl_dir, f["name"])))
 
-    exclude_paths = [os.path.normpath(p) for p in _cfg().get("exclude_paths", [])]
+    download_dirs = _collapse_nested_scan_dirs(raw_dirs)
+
+    exclude_paths = [os.path.normpath(p) for p in cfg.get("exclude_paths", [])]
 
     def _is_excluded(path):
         np = os.path.normpath(path)
@@ -537,6 +559,7 @@ def get_orphan_files():
 
     _HIDDEN = {".recycle", "@eaDir", "#recycle", "@Recycle"}
     orphans = []
+    seen_paths = set()
     for scan_dir in download_dirs:
         if not os.path.isdir(scan_dir) or _is_excluded(scan_dir):
             continue
@@ -548,17 +571,24 @@ def get_orphan_files():
                 full_path = os.path.join(dirpath, filename)
                 if os.path.islink(full_path) or _is_excluded(full_path):
                     continue
-                if os.path.normpath(full_path) not in torrent_files:
-                    try:
-                        size = os.path.getsize(full_path)
-                    except OSError:
-                        size = 0
-                    orphans.append({
-                        "name":      filename,
-                        "path":      full_path,
-                        "parentDir": dirpath,
-                        "size":      size,
-                    })
+                norm_full = os.path.normpath(full_path)
+                if norm_full in torrent_files:
+                    continue
+                # Defensive dedup: even if the collapse above missed a
+                # nested scan dir, no duplicate row survives here.
+                if norm_full in seen_paths:
+                    continue
+                seen_paths.add(norm_full)
+                try:
+                    size = os.path.getsize(full_path)
+                except OSError:
+                    size = 0
+                orphans.append({
+                    "name":      filename,
+                    "path":      full_path,
+                    "parentDir": dirpath,
+                    "size":      size,
+                })
 
     orphans.sort(key=lambda f: f["size"], reverse=True)
     return orphans, sum(f["size"] for f in orphans)
