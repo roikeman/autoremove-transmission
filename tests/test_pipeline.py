@@ -147,6 +147,47 @@ def test_execute_uses_radarr_for_movies():
     assert clients.sonarr.deleted == []
 
 
+def test_execute_reports_real_bytes_freed_for_sonarr_owned_title(tmp_path):
+    # Sonarr deletes the files itself -- nothing in this pipeline gets to
+    # stat them afterward, so bytes_freed must come from the pre-deletion
+    # capture in _capture_inode_keys(), not stay 0.
+    show_dir = tmp_path / "share" / "Show"
+    show_dir.mkdir(parents=True)
+    (show_dir / "ep1.mkv").write_bytes(b"x" * 1000)
+    (show_dir / "ep2.mkv").write_bytes(b"y" * 2000)
+
+    clients = _clients()
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")]}
+    candidate = _candidate(path=str(show_dir))
+    results = pipeline.execute([candidate], cfg, clients)
+
+    assert results[0]["bytes_freed"] == 3000
+    # The real assertion for *this* bug: not silently 0 just because Sonarr
+    # (not this code) is the one that actually unlinked the files.
+    assert results[0]["bytes_freed"] != 0
+
+
+def test_execute_reports_real_bytes_freed_for_radarr_owned_title(tmp_path):
+    movie_dir = tmp_path / "share" / "Movie"
+    movie_dir.mkdir(parents=True)
+    (movie_dir / "movie.mkv").write_bytes(b"z" * 5000)
+
+    clients = _clients()
+    cfg = {**CFG, "library_roots": [str(tmp_path / "share")]}
+    candidate = _candidate(kind="movie", owner="radarr", owner_id=9, path=str(movie_dir))
+    results = pipeline.execute([candidate], cfg, clients)
+
+    assert results[0]["bytes_freed"] == 5000
+
+
+def test_execute_arr_owned_bytes_freed_zero_when_path_already_gone():
+    # A candidate whose files vanished before execute ran (already deleted
+    # by some other process) must not raise -- just report 0 bytes freed.
+    clients = _clients()
+    results = pipeline.execute([_candidate(path="/share/does-not-exist")], CFG, clients)
+    assert results[0]["bytes_freed"] == 0
+
+
 def test_execute_records_partial_on_jellyfin_failure():
     class Boom(FakeJellyfin):
         def delete_item(self, item_id):

@@ -3,6 +3,8 @@ import errno
 import fcntl
 import json
 import os
+import threading
+from datetime import datetime
 import requests
 from flask import Flask, jsonify, render_template, request as flask_request
 import config as cfg_mod
@@ -51,6 +53,14 @@ def _candidates_cache_path():
     return os.path.join(_state_dir(), "candidates_cache.json")
 
 
+def _scan_lock_path():
+    return os.path.join(_state_dir(), "scan.lock")
+
+
+def _scan_status_path():
+    return os.path.join(_state_dir(), "scan_status.json")
+
+
 @contextlib.contextmanager
 def _run_lock():
     """Cross-process mutual exclusion for a cleanup run.
@@ -86,6 +96,145 @@ def _run_lock():
             os.close(fd)
         except OSError:
             pass
+
+
+def _acquire_scan_lock():
+    """Try to acquire the dedicated scan lock without blocking.
+
+    Separate from _run_lock()/cleanup.lock: a running scan and a running
+    delete must each be exclusive with themselves (only one scan, only one
+    delete, at a time), but not with each other -- so this gets its own
+    flock()'d file rather than reusing cleanup.lock.
+
+    Returns an open, already-locked fd on success -- the caller owns it and
+    must fcntl.flock(fd, LOCK_UN) + os.close(fd) when the scan finishes.
+    Returns None if a scan is already running (in this or another gunicorn
+    worker process); the fd is closed before returning in that case.
+    """
+    directory = _state_dir()
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    path = _scan_lock_path()
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        os.close(fd)
+        if e.errno in (errno.EACCES, errno.EAGAIN):
+            return None
+        raise
+    return fd
+
+
+def _scan_lock_is_free():
+    """True if nothing currently holds the scan lock.
+
+    Probes by acquiring then immediately releasing -- flock() is owned by
+    the OS per open file description, not by any Python-level bookkeeping,
+    so if the worker process that was running a scan died (OOM kill, crash,
+    restart) mid-scan, the lock is already gone and this returns True. That
+    is exactly how _reconcile_scan_status() tells a dead scan apart from a
+    healthy one still actually running.
+    """
+    fd = _acquire_scan_lock()
+    if fd is None:
+        return False
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+    return True
+
+
+_SCAN_STATUS_IDLE = {
+    "state": "idle", "started_at": None, "finished_at": None,
+    "progress": None, "error": None, "heartbeat": None,
+}
+
+
+def _save_scan_status(status):
+    directory = _state_dir()
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    path = _scan_status_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(status, f)
+    os.replace(tmp_path, path)
+
+
+def _load_scan_status():
+    """Fails open to "idle" (never raises) on a missing or corrupt status
+    file -- same tolerant handling as the plan/cache loaders below."""
+    path = _scan_status_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return dict(_SCAN_STATUS_IDLE)
+    if not isinstance(data, dict) or "state" not in data:
+        return dict(_SCAN_STATUS_IDLE)
+    return data
+
+
+def _reconcile_scan_status():
+    """Read the scan status file, correcting a lie it might be telling.
+
+    A status file that says "running" is only trustworthy while something
+    actually holds the scan lock -- see _acquire_scan_lock(). A worker that
+    dies mid-scan (OOM, crash, restart) releases the lock via the OS but
+    never gets to write a final status, so without this check the UI would
+    poll "running" forever. If the lock turns out to be free, this rewrites
+    the status to "error" with a clear message instead.
+    """
+    status = _load_scan_status()
+    if status.get("state") == "running" and _scan_lock_is_free():
+        status = {
+            **status,
+            "state": "error",
+            "error": "scan process stopped unexpectedly (lock was released without finishing)",
+            "finished_at": datetime.now().isoformat(),
+        }
+        _save_scan_status(status)
+    return status
+
+
+def _run_scan_job(cfg, lock_fd):
+    """Runs the real (slow) scan on a background thread, started by
+    POST /api/library/scan so the request that triggered it can return
+    immediately. Owns lock_fd (already flock'd by the caller) for the
+    scan's full duration, and always releases + closes it before returning
+    -- success or failure -- which is what makes lock-held the source of
+    truth for "a scan is actually running" (see _scan_lock_is_free).
+    """
+    def on_progress(users_done, users_total, phase):
+        current = _load_scan_status()
+        current["progress"] = {
+            "users_done": users_done, "users_total": users_total, "phase": phase,
+        }
+        current["heartbeat"] = datetime.now().isoformat()
+        _save_scan_status(current)
+
+    status = _load_scan_status()
+    try:
+        found = _scan(cfg, progress_cb=on_progress)
+        scanned_at = datetime.now().isoformat()
+        _save_candidates_cache(found, int(cfg["age_days"]), int(cfg["idle_days"]), scanned_at)
+        status["state"] = "done"
+        status["finished_at"] = scanned_at
+        status["heartbeat"] = scanned_at
+        status["error"] = None
+        _save_scan_status(status)
+    except Exception as exc:
+        now = datetime.now().isoformat()
+        status["state"] = "error"
+        status["finished_at"] = now
+        status["heartbeat"] = now
+        status["error"] = str(exc)
+        _save_scan_status(status)
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 
 def _save_last_plan(jf_ids):
@@ -173,13 +322,6 @@ def _load_candidates_cache():
     if not isinstance(data["candidates"], list):
         return None
     return data
-
-
-def _clear_candidates_cache():
-    try:
-        os.remove(_candidates_cache_path())
-    except OSError:
-        pass
 
 
 def _candidate_from_cached_dict(d):
@@ -272,34 +414,6 @@ def _reconstruct_cached_candidates(cached):
         return [_candidate_from_cached_dict(d) for d in cached["candidates"]]
     except (KeyError, TypeError, ValueError):
         return None
-
-
-def _scan_with_cache(cfg, force_refresh=False):
-    """Return (candidates, meta) for cfg's age/idle thresholds, sharing one
-    on-disk cache across /api/library/candidates, /plan and /execute.
-
-    The cache is served when it exists and its age_days/idle_days match the
-    thresholds this request is asking for; otherwise (missing/corrupt cache,
-    mismatched thresholds, or force_refresh) a fresh _scan() is run and its
-    result is cached for next time. meta carries "cached" (bool) and
-    "scanned_at" (ISO string) for the API response.
-    """
-    from datetime import datetime
-
-    age = int(cfg["age_days"])
-    idle = int(cfg["idle_days"])
-
-    if not force_refresh:
-        cached = _load_candidates_cache()
-        if cached is not None and cached["age_days"] == age and cached["idle_days"] == idle:
-            candidates = _reconstruct_cached_candidates(cached)
-            if candidates is not None:
-                return candidates, {"cached": True, "scanned_at": cached["scanned_at"]}
-
-    found = _scan(cfg)
-    scanned_at = datetime.now().isoformat()
-    _save_candidates_cache(found, age, idle, scanned_at)
-    return found, {"cached": False, "scanned_at": scanned_at}
 
 
 @app.route("/")
@@ -589,8 +703,18 @@ def _user_series_last_played(jf, user_id):
     return per_series, True
 
 
-def _scan(cfg):
+def _scan(cfg, progress_cb=None):
     """Build the full candidate list. Merges user data across all Jellyfin users.
+
+    `progress_cb`, when given, is called as progress_cb(users_done,
+    users_total, phase) at cheap, honest checkpoints -- phase is one of
+    "sonarr" (building the owner index from Sonarr/Radarr), "jellyfin" (the
+    per-user Jellyfin round-trips, the bulk of the ~200s this takes on a
+    91-user server), or "hardlinks" (the final per-candidate stale/hardlink
+    pass). This is deliberately not a percentage: there is no cheap way to
+    know in advance how many candidates will survive the stale filter, so
+    callers wanting a fraction can compute users_done/users_total
+    themselves instead of this function inventing a number it can't back up.
 
     Series episode counts and file sizes come from Sonarr's `statistics`
     object (episodeCount, sizeOnDisk) on the /api/v3/series response --
@@ -609,8 +733,13 @@ def _scan(cfg):
     """
     from datetime import datetime
 
+    def _report(users_done, users_total, phase):
+        if progress_cb:
+            progress_cb(users_done, users_total, phase)
+
     jf = JellyfinClient(cfg["jellyfin_url"], cfg["jellyfin_api_key"])
 
+    _report(0, 0, "sonarr")
     sonarr_items = []
     radarr_items = []
     if cfg.get("sonarr_url"):
@@ -622,6 +751,8 @@ def _scan(cfg):
     radarr_by_id = cand.radarr_stats_by_id(radarr_items)
 
     users = jf.users()
+    total_users = len(users)
+    _report(0, total_users, "jellyfin")
 
     # First pass: one played-episodes call per user. Collected up front (not
     # interleaved with the merge loop below) so the scan-wide reliability
@@ -630,15 +761,16 @@ def _scan(cfg):
     # loop must not leave earlier candidates under-flagged.
     series_last_played_by_user = {}
     any_unreliable = False
-    for user in users:
+    for i, user in enumerate(users):
         uid = user["Id"]
         per_series, reliable = _user_series_last_played(jf, uid)
         series_last_played_by_user[uid] = per_series
         if not reliable:
             any_unreliable = True
+        _report(i + 1, total_users, "jellyfin")
 
     merged = {}
-    for user in users:
+    for i, user in enumerate(users):
         uid = user["Id"]
         series_last_played = series_last_played_by_user[uid]
         for item in jf.items(uid, "Series"):
@@ -657,7 +789,9 @@ def _scan(cfg):
             owner, owner_id = cand.match_owner(path, owner_index)
             size_bytes = cand.radarr_size(owner, owner_id, radarr_by_id)
             _merge(merged, cand.from_movie(item, owner_index, size_bytes=size_bytes))
+        _report(i + 1, total_users, "jellyfin")
 
+    _report(total_users, total_users, "hardlinks")
     now = datetime.now()
     age = int(cfg["age_days"])
     idle = int(cfg["idle_days"])
@@ -746,35 +880,101 @@ def library_page():
     return render_template("library.html")
 
 
-@app.route("/api/library/candidates")
-def api_candidates():
+@app.route("/api/library/scan", methods=["POST"])
+def api_start_scan():
+    """Kick off a scan on a background thread and return immediately.
+
+    Never blocks the caller for the ~200s a real scan takes: acquires the
+    dedicated scan lock (non-blocking) and, on success, hands the actual
+    work to _run_scan_job() on a daemon thread before responding. If a scan
+    is already running -- in this worker or another gunicorn worker
+    process, see _acquire_scan_lock() -- responds 409 with the current
+    (reconciled) status instead of starting a second one.
+    """
     cfg = cfg_mod.load()
     try:
         _require(cfg, "jellyfin_url", "jellyfin_api_key")
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 503
 
+    body = flask_request.get_json(silent=True) or {}
     for key in ("age_days", "idle_days"):
-        override = flask_request.args.get(key)
-        if override:
-            cfg[key] = int(override)
+        override = body.get(key)
+        if override not in (None, ""):
+            try:
+                cfg[key] = int(override)
+            except (TypeError, ValueError):
+                return jsonify({"error": f"{key} must be an integer"}), 400
 
-    force_refresh = flask_request.args.get("refresh") == "1"
+    lock_fd = _acquire_scan_lock()
+    if lock_fd is None:
+        return jsonify(_reconcile_scan_status()), 409
 
+    now = datetime.now().isoformat()
+    status = {
+        "state": "running", "started_at": now, "finished_at": None,
+        "progress": {"users_done": 0, "users_total": 0, "phase": "sonarr"},
+        "error": None, "heartbeat": now,
+    }
+    _save_scan_status(status)
+
+    thread = threading.Thread(target=_run_scan_job, args=(cfg, lock_fd), daemon=True)
+    thread.start()
+
+    return jsonify(status), 202
+
+
+@app.route("/api/library/scan/status")
+def api_scan_status():
+    """Never blocks: reads the status file (reconciling a dead worker's
+    stale "running" state, see _reconcile_scan_status) and returns it."""
+    return jsonify(_reconcile_scan_status())
+
+
+@app.route("/api/library/candidates")
+def api_candidates():
+    """Always serves the cache -- never scans, never blocks. A real scan
+    takes ~200s on a 91-user Jellyfin; running it inline here is exactly
+    the "looked like the app had died" bug this endpoint must not repeat.
+    Use POST /api/library/scan to populate/refresh the cache instead.
+    """
+    cfg = cfg_mod.load()
     try:
-        found, meta = _scan_with_cache(cfg, force_refresh=force_refresh)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
+        _require(cfg, "jellyfin_url", "jellyfin_api_key")
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+
+    empty_response = {
+        "candidates": [],
+        "preticked": sorted(buckets.PRETICKED),
+        "labels": buckets.LABELS,
+        "age_days": cfg["age_days"],
+        "idle_days": cfg["idle_days"],
+        "cached": False,
+        "scanned_at": None,
+        "scan_required": True,
+    }
+
+    cached = _load_candidates_cache()
+    if cached is None:
+        return jsonify(empty_response)
+
+    found = _reconstruct_cached_candidates(cached)
+    if found is None:
+        # Corrupt cache -- treated the same as "no cache" rather than a 502,
+        # same fail-open handling _load_candidates_cache already uses.
+        return jsonify(empty_response)
 
     found.sort(key=lambda c: c.size_bytes, reverse=True)
     return jsonify({
         "candidates": [c.to_dict() for c in found],
         "preticked": sorted(buckets.PRETICKED),
         "labels": buckets.LABELS,
-        "age_days": cfg["age_days"],
-        "idle_days": cfg["idle_days"],
-        "cached": meta["cached"],
-        "scanned_at": meta["scanned_at"],
+        "age_days": cached["age_days"],
+        "idle_days": cached["idle_days"],
+        "cached": True,
+        "scanned_at": cached["scanned_at"],
+        "scan_required": False,
     })
 
 
@@ -788,25 +988,58 @@ def _selected(cfg, jf_ids):
     # idempotent: a title deleted in the meantime returns 404 from
     # Sonarr/Radarr (treated as success) and a missing path frees 0 bytes.
     #
-    # Unlike _scan_with_cache (used by GET /candidates), this deliberately
-    # does NOT require the cache's age_days/idle_days to match cfg's
-    # current defaults: cfg here is cfg_mod.load(), which never carries the
-    # per-request query-param overrides GET /candidates applied. Requiring
-    # a threshold match would force /plan and /execute back into a full
-    # synchronous rescan every time the user reviewed candidates with
-    # custom thresholds -- reintroducing the multi-minute timeout this
-    # cache exists to eliminate, on the two POST endpoints where it hurts
-    # most. The plan->execute selection guard (comparing jf_ids against the
-    # persisted last plan) and pipeline.execute's own blast-radius check
-    # still pin what actually gets deleted, independent of this choice.
+    # Unlike the old scan-with-cache fallback, this NEVER falls back to a
+    # fresh _scan(): if there is no usable cache at all, it returns None so
+    # the caller can fail clearly (409) rather than kick off a 200-second
+    # scan inside a POST request.
     wanted = set(jf_ids)
 
     cached = _load_candidates_cache()
     found = _reconstruct_cached_candidates(cached) if cached is not None else None
     if found is None:
-        found, _meta = _scan_with_cache(cfg)
+        return None
 
     return [c for c in found if c.jf_id in wanted]
+
+
+def _update_candidates_cache_after_execute(results):
+    """Remove successfully-deleted titles from the cache and write it back,
+    instead of clearing the whole cache. A wholesale clear meant the very
+    next page load paid a full ~200s synchronous-feeling rescan for what
+    should be an instant "37 fewer rows" update; titles that came back
+    "partial" or "failed" may still exist, so they are deliberately left in
+    place rather than removed.
+    """
+    cached = _load_candidates_cache()
+    if cached is None:
+        return
+    found = _reconstruct_cached_candidates(cached)
+    if found is None:
+        return
+
+    deleted_ids = {r["jf_id"] for r in results if r.get("status") == "deleted"}
+    if not deleted_ids:
+        return
+
+    remaining = [c for c in found if c.jf_id not in deleted_ids]
+    _save_candidates_cache(remaining, cached["age_days"], cached["idle_days"], cached["scanned_at"])
+
+
+def _refresh_jellyfin_after_execute(cfg):
+    """Ask Jellyfin to refresh its library after a run, so a just-deleted
+    title stops reappearing as a candidate on the next scan (Jellyfin's own
+    view of the filesystem can lag behind the delete that was just issued).
+
+    Best-effort and never fatal: a refresh failure must not fail an
+    otherwise-successful delete run. It is journaled as its own entry
+    instead, independent of every title's own result.
+    """
+    try:
+        jf = JellyfinClient(cfg["jellyfin_url"], cfg["jellyfin_api_key"])
+        jf.refresh_library()
+        journal.append({"kind": "jellyfin_refresh", "status": "ok"})
+    except Exception as exc:
+        journal.append({"kind": "jellyfin_refresh", "status": "error", "detail": str(exc)})
 
 
 @app.route("/api/library/plan", methods=["POST"])
@@ -817,8 +1050,11 @@ def api_plan():
     if not jf_ids:
         return jsonify({"error": "no titles selected"}), 400
 
+    selection = _selected(cfg, jf_ids)
+    if selection is None:
+        return jsonify({"error": "no scan available yet; run a scan first"}), 409
+
     try:
-        selection = _selected(cfg, jf_ids)
         result = pipeline.plan(selection, cfg)
     except pipeline.BlastRadiusExceeded as e:
         return jsonify({"error": str(e), "blast_radius": True}), 409
@@ -849,8 +1085,11 @@ def api_execute():
         if not acquired:
             return jsonify({"error": "a cleanup run is already in progress"}), 409
 
+        selection = _selected(cfg, jf_ids)
+        if selection is None:
+            return jsonify({"error": "no scan available yet; run a scan first"}), 409
+
         try:
-            selection = _selected(cfg, jf_ids)
             # Note: execute() re-checks the blast-radius caps itself, so a second
             # pipeline.plan() call here would be redundant -- omitted.
             results = pipeline.execute(selection, cfg, _build_clients(cfg))
@@ -860,10 +1099,8 @@ def api_execute():
             return jsonify({"error": str(e)}), 502
 
     _clear_last_plan()
-    # The library just changed -- a cached candidate list would now list
-    # titles that no longer exist, so the next /candidates or /plan must
-    # re-scan rather than serve stale data.
-    _clear_candidates_cache()
+    _update_candidates_cache_after_execute(results)
+    _refresh_jellyfin_after_execute(cfg)
     return jsonify({"results": results})
 
 

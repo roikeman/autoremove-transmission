@@ -138,14 +138,27 @@ def _real_bytes(candidate, cfg):
 
 
 def _capture_inode_keys(path):
-    """Stat every file under `path` and return its {(st_dev, st_ino)} set.
+    """Stat every file under `path` and return ({(st_dev, st_ino)}, total_size_bytes).
 
     Must be called BEFORE the owner/file deletion step runs: once that step
     removes the files, they can no longer be stat'd. A missing or
-    unreadable path yields an empty set rather than raising, so a
+    unreadable path yields (empty set, 0) rather than raising, so a
     candidate whose files are already gone never blocks the run.
+
+    The size total exists for one reason: when the *arr that owns this
+    title deletes the files itself (Sonarr/Radarr), nothing else in this
+    pipeline ever gets to stat them again, so bytes_freed would otherwise
+    be silently 0 for every *arr-owned title -- see _execute_one. It is
+    the on-disk size of the files that existed immediately before the
+    delete was issued, the exact same "listed size at delete time" meaning
+    _delete_tree()/delete_file() already report for a directly-deleted
+    file (neither subtracts out hardlinks -- that hardlink-aware "how much
+    distinct space did this actually free" accounting is a separate
+    question, answered by _real_bytes()/the frees-less-than-listed flag,
+    not by bytes_freed).
     """
     keys = set()
+    total_size = 0
     try:
         if os.path.isfile(path):
             files = [path]
@@ -154,9 +167,9 @@ def _capture_inode_keys(path):
             for dirpath, _dirs, names in os.walk(path):
                 files.extend(os.path.join(dirpath, n) for n in names)
         else:
-            return keys
+            return keys, total_size
     except OSError:
-        return keys
+        return keys, total_size
 
     for file_path in files:
         try:
@@ -164,7 +177,8 @@ def _capture_inode_keys(path):
         except OSError:
             continue
         keys.add((info.st_dev, info.st_ino))
-    return keys
+        total_size += info.st_size
+    return keys, total_size
 
 
 def execute(candidates, cfg, clients):
@@ -211,19 +225,27 @@ def _execute_one(candidate, cfg, clients):
     steps = []
     freed = 0
 
-    # Capture inode identity before anything is deleted -- this is how the
-    # (single, end-of-run) transmission sweep later recognizes which
-    # torrents belong to titles this run actually deleted.
-    inode_keys = _capture_inode_keys(candidate.path)
+    # Capture inode identity (and each file's current size) before anything
+    # is deleted -- this is how the (single, end-of-run) transmission sweep
+    # later recognizes which torrents belong to titles this run actually
+    # deleted, and how an *arr-owned title still gets a real bytes_freed
+    # below even though Sonarr/Radarr -- not this code -- removes its files.
+    inode_keys, pre_delete_size = _capture_inode_keys(candidate.path)
 
     # 1. Remove from the *arr that owns it, or delete files directly.
     try:
         if candidate.owner == "sonarr":
             clients.sonarr.delete_item(candidate.owner_id)
             step = {"step": f"sonarr:delete/{candidate.owner_id}", "status": "ok", "detail": ""}
+            # Sonarr deletes the files itself -- this code never gets to stat
+            # them afterward, so bytes_freed is the size captured just above,
+            # right before this delete was issued. See _capture_inode_keys's
+            # docstring for exactly what this number does and doesn't mean.
+            freed = pre_delete_size
         elif candidate.owner == "radarr":
             clients.radarr.delete_item(candidate.owner_id)
             step = {"step": f"radarr:delete/{candidate.owner_id}", "status": "ok", "detail": ""}
+            freed = pre_delete_size
         else:
             freed += _delete_tree(candidate.path, cfg.get("library_roots") or [])
             step = {"step": "files:delete", "status": "ok", "detail": str(freed)}
