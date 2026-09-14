@@ -27,8 +27,10 @@ RECENT_DATE = "2026-08-20T00:00:00.0000000Z"       # inside the age window
 PAST_IDLE_DATE = "2026-01-01T00:00:00.0000000Z"     # outside the idle window
 
 
-def _series_item(series_id, name, path, added=OLD_DATE, last_played=None, unplayed=None):
-    user_data = {"Played": False, "LastPlayedDate": last_played}
+def _series_item(series_id, name, path, added=OLD_DATE, last_played=None,
+                 unplayed=None, favorite=False):
+    user_data = {"Played": False, "LastPlayedDate": last_played,
+                 "IsFavorite": favorite}
     if unplayed is not None:
         user_data["UnplayedItemCount"] = unplayed
     return {
@@ -233,6 +235,25 @@ def test_viewer_breakdown_counts_finished_started_dropped(monkeypatch):
     assert c.users_dropped == 1
 
 
+def test_viewer_breakdown_counts_favorites_across_users(monkeypatch):
+    app_module = _patch(monkeypatch)
+    path = "/share/series/Show"
+    favorite = _series_item("s1", "Show", path, unplayed=0, favorite=True)
+    not_favorite = _series_item("s1", "Show", path, unplayed=10)
+
+    _FakeJellyfin.reset(
+        users_list=[{"Id": "favorite"}, {"Id": "not-favorite"}],
+        series_by_user={"favorite": [favorite], "not-favorite": [not_favorite]},
+    )
+    _FakeArr.reset(sonarr_items=[
+        _sonarr_series(1, path, episode_count=16, size_on_disk=1)
+    ])
+
+    result = app_module._scan(_base_cfg())
+    assert len(result) == 1
+    assert result[0].users_favorite == 1
+
+
 def test_viewer_breakdown_survives_flags_across_many_merges(monkeypatch):
     """91-user regression guard: the episode-data-unavailable flag (and the
     pre-tick guard it drives) must survive every merge, not just the
@@ -303,7 +324,7 @@ def _dict_candidate(**over):
         jf_id="1", kind="movie", title="A", path="/x/a", size_bytes=10,
         added=None, last_played=None, episodes=1, watched=1,
         progress_pct=100.0, owner=None, owner_id=None, bucket="B",
-        users_finished=3, users_started=2, users_dropped=1,
+        users_finished=3, users_started=2, users_dropped=1, users_favorite=4,
     )
     base.update(over)
     return Candidate(**base)
@@ -314,6 +335,7 @@ def test_cache_round_trip_preserves_viewer_breakdown_fields():
     d = _dict_candidate().to_dict()
     restored = app_module._candidate_from_cached_dict(d)
     assert (restored.users_finished, restored.users_started, restored.users_dropped) == (3, 2, 1)
+    assert restored.users_favorite == 4
 
 
 def test_cache_missing_viewer_breakdown_fields_defaults_to_zero_not_raise():
@@ -322,8 +344,10 @@ def test_cache_missing_viewer_breakdown_fields_defaults_to_zero_not_raise():
     del d["users_finished"]
     del d["users_started"]
     del d["users_dropped"]
+    del d["users_favorite"]
     restored = app_module._candidate_from_cached_dict(d)  # must not raise
     assert (restored.users_finished, restored.users_started, restored.users_dropped) == (0, 0, 0)
+    assert restored.users_favorite == 0
 
 
 def test_cache_wrong_typed_viewer_breakdown_field_still_raises():

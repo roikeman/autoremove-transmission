@@ -26,12 +26,14 @@ class Candidate:
     flags: list = field(default_factory=list)
     # Per-title viewer breakdown across every Jellyfin user (see
     # classify_viewer below for the exact finished/started/never-opened
-    # definitions). Populated by app._merge() while folding in each user's
-    # view; defaulted to 0 here only so direct Candidate(...) construction
-    # (tests, the cache-miss path) never needs to pass them explicitly.
+    # definitions), plus the number of users who marked the title as a
+    # favorite. Populated by app._merge() while folding in each user's view;
+    # defaulted to 0 here only so direct Candidate(...) construction (tests,
+    # the cache-miss path) never needs to pass them explicitly.
     users_finished: int = 0
     users_started: int = 0
     users_dropped: int = 0
+    users_favorite: int = 0
 
     def to_dict(self):
         return {
@@ -52,6 +54,7 @@ class Candidate:
             "users_finished": self.users_finished,
             "users_started": self.users_started,
             "users_dropped": self.users_dropped,
+            "users_favorite": self.users_favorite,
         }
 
 
@@ -340,6 +343,7 @@ def from_series(item, owner_index, episodes=None, watched=None, size_bytes=None,
         owner_id=owner_id,
         bucket=bucket,
         flags=flags,
+        users_favorite=1 if user.get("IsFavorite") else 0,
     )
 
 
@@ -369,4 +373,5 @@ def from_movie(item, owner_index, size_bytes=None):
         owner_id=owner_id,
         bucket=buckets.classify("movie", 1, watched, last_played, progress),
         flags=buckets.quality_flags(added, last_played, False),
+        users_favorite=1 if user.get("IsFavorite") else 0,
     )

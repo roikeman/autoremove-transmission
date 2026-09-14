@@ -177,6 +177,7 @@
     .viewer-breakdown { font-size: .78rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
     .viewer-finished { color: #6fd98e; }
     .viewer-started  { color: var(--warn); }
+    .viewer-favorite { color: #f08aac; }
     .viewer-dropped  { color: var(--text-muted); }
     .viewer-sep { color: var(--text-muted); margin: 0 .2em; }
     .hardlink-badge {
@@ -910,7 +911,7 @@ const TABLE_COLUMNS = [
   { text: "Title",       key: "title",       defaultDir: "asc"  },
   { text: "Kind",        width: "70px",  key: "kind",        defaultDir: "asc"  },
   { text: "Progress",    width: "110px", key: "progress",    defaultDir: "desc" },
-  { text: "Viewers",     width: "130px" },
+  { text: "Viewers",     width: "165px" },
   { text: "Size",        width: "100px", key: "size",        defaultDir: "desc" },
   { text: "Added",       width: "110px", key: "added",       defaultDir: "desc" },
   { text: "Last played", width: "110px", key: "last_played", defaultDir: "desc" },
@@ -1006,7 +1007,8 @@ function buildRow(c) {
   tr.appendChild(tdProgress);
 
   // Viewers -- compact per-title breakdown across every Jellyfin user:
-  // "12✓ / 3▶ / 76·" = finished / started / never opened. Purely numeric,
+  // "12✓ / 3▶ / 4★ / 76·" = finished / started / favorite /
+  // never opened. Purely numeric,
   // still built with textContent-only nodes for consistency with the rest
   // of this table.
   const tdViewers = document.createElement("td");
@@ -1014,6 +1016,10 @@ function buildRow(c) {
   viewers.appendChild(el("span", { className: "viewer-finished", text: `${c.users_finished || 0}✓` }));
   viewers.appendChild(el("span", { className: "viewer-sep", text: "/" }));
   viewers.appendChild(el("span", { className: "viewer-started", text: `${c.users_started || 0}▶` }));
+  viewers.appendChild(el("span", { className: "viewer-sep", text: "/" }));
+  const favoriteCount = el("span", { className: "viewer-favorite", text: `${c.users_favorite || 0}★` });
+  favoriteCount.title = "Users who marked this title as a favorite";
+  viewers.appendChild(favoriteCount);
   viewers.appendChild(el("span", { className: "viewer-sep", text: "/" }));
   viewers.appendChild(el("span", { className: "viewer-dropped", text: `${c.users_dropped || 0}·` }));
   tdViewers.appendChild(viewers);

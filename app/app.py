@@ -367,8 +367,8 @@ def _candidate_from_cached_dict(d):
 
     def _int_default(key, default=0):
         # Unlike _int, a MISSING key is not a corruption -- it just means
-        # this entry was cached before the users_finished/started/dropped
-        # viewer-breakdown fields existed, so it defaults rather than
+        # this entry was cached before the viewer-breakdown/favorite fields
+        # existed, so it defaults rather than
         # raising. A key that IS present with the wrong type still raises,
         # same as every other field here, since that indicates real
         # corruption rather than an old cache shape.
@@ -401,6 +401,7 @@ def _candidate_from_cached_dict(d):
         users_finished=_int_default("users_finished"),
         users_started=_int_default("users_started"),
         users_dropped=_int_default("users_dropped"),
+        users_favorite=_int_default("users_favorite"),
     )
 
 
@@ -865,8 +866,9 @@ def _scan(cfg, progress_cb=None):
 def _merge(store, candidate, last_played_unreliable=False):
     """Keep the most-watched, most-recently-played view across users, and
     accumulate the per-user viewer breakdown (users_finished/started/dropped)
-    behind the compact "12 finished / 3 started / 76 never opened" UI column
-    (see candidates.classify_viewer for the exact definitions).
+    and favorite count behind the compact
+    "12 finished / 3 started / 4 favorite / 76 never opened" UI column (see
+    candidates.classify_viewer for the exact viewing-state definitions).
 
     Data-quality flags set by candidates.from_series (e.g.
     "episode-data-unavailable", "watch-count-unavailable") describe a fact
@@ -896,6 +898,7 @@ def _merge(store, candidate, last_played_unreliable=False):
         store[candidate.jf_id] = candidate
         existing = candidate
     else:
+        existing.users_favorite += candidate.users_favorite
         if candidate.watched > existing.watched:
             existing.watched = candidate.watched
         if candidate.last_played and (

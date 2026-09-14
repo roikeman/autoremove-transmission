@@ -124,6 +124,12 @@ def test_from_series_computes_watched_from_unplayed_count():
     assert c.bucket == "C1"
 
 
+def test_from_series_reads_user_favorite():
+    item = _series_item()
+    item["UserData"]["IsFavorite"] = True
+    assert C.from_series(item, {}).users_favorite == 1
+
+
 def test_from_series_uses_date_last_media_added():
     c = C.from_series(_series_item(), {})
     assert c.added == datetime(2025, 2, 1)
@@ -230,6 +236,12 @@ def test_from_movie_watched():
     assert c.watched == 1
     assert c.bucket == "B"
     assert c.size_bytes == 4294967296
+
+
+def test_from_movie_reads_user_favorite():
+    item = _movie_item()
+    item["UserData"]["IsFavorite"] = True
+    assert C.from_movie(item, {}).users_favorite == 1
 
 
 def test_from_movie_sampled_has_no_resume_point():
