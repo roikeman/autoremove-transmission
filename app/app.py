@@ -9,6 +9,7 @@ import requests
 from flask import Flask, jsonify, render_template, request as flask_request
 import config as cfg_mod
 import version
+import storage
 from clients.transmission import (
     rpc_call,
     get_all_torrents,
@@ -463,6 +464,39 @@ def health():
         })
     except Exception as e:
         return jsonify({"status": "error", "build": build, "error": str(e)}), 503
+
+
+def _storage_paths():
+    """Discover media paths as they are visible inside this container."""
+    cfg = _cfg()
+    paths = set(cfg.get("library_roots") or [])
+
+    # Transmission paths need the same prefix normalization used by deletion
+    # and orphan scanning. A connection failure must not hide library storage
+    # that can still be read from config/cache.
+    try:
+        for torrent in get_all_torrents():
+            path = tx.normalize_path(torrent.get("downloadDir", ""), cfg)
+            if path:
+                paths.add(path)
+    except Exception:
+        pass
+
+    # Candidate paths reveal separately-mounted filesystems nested beneath a
+    # broad configured root such as /share. Reading the existing cache is
+    # cheap and never starts a Jellyfin scan.
+    cached = _load_candidates_cache()
+    if cached:
+        for candidate in cached.get("candidates", []):
+            path = candidate.get("path") if isinstance(candidate, dict) else None
+            if isinstance(path, str) and path:
+                paths.add(path)
+    return paths
+
+
+@app.route("/api/storage")
+def api_storage():
+    return jsonify({"filesystems": storage.filesystem_usage(_storage_paths())})
 
 
 @app.route("/api/test-connection", methods=["POST"])

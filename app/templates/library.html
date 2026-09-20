@@ -76,6 +76,24 @@
     .btn-refresh:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); color: #fff; }
     .btn-refresh:disabled { opacity: .5; pointer-events: none; }
 
+    .storage-bar {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: .75rem 2rem; display: flex; gap: .75rem; flex-wrap: wrap;
+    }
+    .storage-card {
+      min-width: 250px; flex: 1 1 280px; max-width: 430px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: .65rem .85rem;
+    }
+    .storage-path { font-size: .78rem; font-weight: 600; overflow-wrap: anywhere; }
+    .storage-values {
+      display: flex; justify-content: space-between; gap: 1rem;
+      color: var(--text-muted); font-size: .74rem; margin-top: .35rem;
+    }
+    .storage-track { height: 5px; background: rgba(255,255,255,.08); border-radius: 999px; overflow: hidden; margin-top: .45rem; }
+    .storage-fill { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: inherit; }
+    .storage-fill.warn { background: linear-gradient(90deg, #e09b52, var(--danger)); }
+
     .main-content { padding: 1.5rem 2rem; }
 
     .alert-error {
@@ -304,6 +322,8 @@
   </button>
 </div>
 
+<div class="storage-bar" id="storageBar" style="display:none"></div>
+
 <main class="main-content">
   <div class="alert-error" id="errorBox"></div>
 
@@ -439,6 +459,49 @@ function formatBytes(bytes) {
   bytes = Number(bytes) || 0;
   while (bytes >= 1024 && i < u.length - 1) { bytes /= 1024; i++; }
   return bytes.toFixed(2) + " " + u[i];
+}
+
+function renderStorage(filesystems) {
+  const bar = document.getElementById("storageBar");
+  bar.textContent = "";
+  if (!filesystems.length) {
+    bar.style.display = "none";
+    return;
+  }
+  filesystems.forEach(fs => {
+    const card = el("div", { className: "storage-card" });
+    card.appendChild(el("div", {
+      className: "storage-path",
+      text: (fs.paths || []).join(" · ") || "Storage"
+    }));
+
+    const values = el("div", { className: "storage-values" });
+    values.appendChild(el("span", { text: `Used ${formatBytes(fs.usedBytes)}` }));
+    values.appendChild(el("span", { text: `Free ${formatBytes(fs.freeBytes)}` }));
+    card.appendChild(values);
+
+    const track = el("div", { className: "storage-track" });
+    const fill = el("div", {
+      className: "storage-fill" + (fs.usedPercent >= 90 ? " warn" : "")
+    });
+    fill.style.width = `${Math.min(Math.max(fs.usedPercent || 0, 0), 100)}%`;
+    track.appendChild(fill);
+    card.appendChild(track);
+    bar.appendChild(card);
+  });
+  bar.style.display = "flex";
+}
+
+async function loadStorage() {
+  try {
+    const resp = await fetch("/api/storage");
+    const data = await parseJsonResponse(resp);
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+    renderStorage(data.filesystems || []);
+  } catch (err) {
+    // Capacity is supplementary; cleanup remains usable if probing it fails.
+    renderStorage([]);
+  }
 }
 
 function formatDate(iso) {
@@ -1251,6 +1314,7 @@ async function executeDelete() {
       _modal.hide();
       // Refresh the list so deleted/changed titles drop out of the buckets.
       await loadCandidates();
+      await loadStorage();
       return;
     }
 
@@ -1419,6 +1483,7 @@ document.getElementById("globalSelectAll").addEventListener("change", function (
 });
 
 loadCandidates();
+loadStorage();
 refreshScanStatusOnLoad();
 </script>
 </body>

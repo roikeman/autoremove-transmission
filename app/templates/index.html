@@ -48,6 +48,23 @@
       background: linear-gradient(135deg, var(--accent), var(--accent2));
       color: #fff; border-radius: 999px; padding: .2em .65em; font-size: .75rem; font-weight: 600;
     }
+    .storage-bar {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: .75rem 2rem; display: flex; gap: .75rem; flex-wrap: wrap;
+    }
+    .storage-card {
+      min-width: 250px; flex: 1 1 280px; max-width: 430px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: .65rem .85rem;
+    }
+    .storage-path { font-size: .78rem; font-weight: 600; overflow-wrap: anywhere; }
+    .storage-values {
+      display: flex; justify-content: space-between; gap: 1rem;
+      color: var(--text-muted); font-size: .74rem; margin-top: .35rem;
+    }
+    .storage-track { height: 5px; background: rgba(255,255,255,.08); border-radius: 999px; overflow: hidden; margin-top: .45rem; }
+    .storage-fill { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: inherit; }
+    .storage-fill.warn { background: linear-gradient(90deg, #e09b52, var(--danger)); }
 
     .main-content { padding: 1.5rem 2rem; }
 
@@ -211,6 +228,8 @@
   </div>
 </div>
 
+<div class="storage-bar" id="storageBar" style="display:none"></div>
+
 <main class="main-content">
   <div class="alert-error" id="errorBox"></div>
 
@@ -364,6 +383,56 @@ function formatBytes(bytes) {
   return bytes.toFixed(2) + "\u00a0" + u[i];
 }
 
+function renderStorage(filesystems) {
+  const bar = document.getElementById("storageBar");
+  bar.textContent = "";
+  if (!filesystems.length) {
+    bar.style.display = "none";
+    return;
+  }
+  filesystems.forEach(fs => {
+    const card = document.createElement("div");
+    card.className = "storage-card";
+
+    const path = document.createElement("div");
+    path.className = "storage-path";
+    path.textContent = (fs.paths || []).join(" · ") || "Storage";
+    card.appendChild(path);
+
+    const values = document.createElement("div");
+    values.className = "storage-values";
+    const used = document.createElement("span");
+    used.textContent = `Used ${formatBytes(fs.usedBytes)}`;
+    const free = document.createElement("span");
+    free.textContent = `Free ${formatBytes(fs.freeBytes)}`;
+    values.appendChild(used);
+    values.appendChild(free);
+    card.appendChild(values);
+
+    const track = document.createElement("div");
+    track.className = "storage-track";
+    const fill = document.createElement("div");
+    fill.className = "storage-fill" + (fs.usedPercent >= 90 ? " warn" : "");
+    fill.style.width = `${Math.min(Math.max(fs.usedPercent || 0, 0), 100)}%`;
+    track.appendChild(fill);
+    card.appendChild(track);
+    bar.appendChild(card);
+  });
+  bar.style.display = "flex";
+}
+
+async function loadStorage() {
+  try {
+    const resp = await fetch("/api/storage");
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+    renderStorage(data.filesystems || []);
+  } catch (err) {
+    // Capacity is supplementary; the main page remains usable if probing it fails.
+    renderStorage([]);
+  }
+}
+
 function esc(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
@@ -488,6 +557,7 @@ async function loadData() {
   tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><i class="bi bi-arrow-repeat spin"></i>Loading…</div></td></tr>';
   _rowSizes = {};
   _allTorrents = [];
+  loadStorage();
 
   try {
     const resp = await fetch("/api/deletable");
@@ -558,6 +628,7 @@ async function executeDelete() {
     }, 400);
 
     _modal.hide();
+    loadStorage();
   } catch (err) {
     errEl.textContent = "Failed: " + err.message;
     errEl.style.display = "block";
@@ -717,6 +788,7 @@ async function executeOrphanDelete() {
     else badge.style.display = "none";
 
     _orphanModal.hide();
+    loadStorage();
   } catch (err) {
     errEl.textContent = "Failed: " + err.message;
     errEl.style.display = "block";
