@@ -27,8 +27,10 @@ jobs:
       - run: pip install -r app/requirements-dev.txt
       - name: Test candidates
         run: pytest -v tests/test_candidates.py
-      - name: Test routes
-        run: pytest -v tests/test_routes.py
+      - name: Test filter revalidation route
+        run: pytest -v tests/test_routes.py::test_plan_revalidates_current_age_and_idle_filters
+      - name: Test remaining routes
+        run: pytest -v tests/test_routes.py -k 'not test_plan_revalidates_current_age_and_idle_filters'
       - name: Test scan progress
         run: pytest -v tests/test_scan_progress.py
       - name: Test scan data
