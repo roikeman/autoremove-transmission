@@ -900,10 +900,12 @@ def _scan(cfg, progress_cb=None):
     # Fetch Transmission once, then join its complete payloads to Jellyfin
     # paths by inode.  A Transmission outage should not make the Jellyfin
     # inventory disappear; it merely leaves seed/tracker metadata empty.
-    try:
-        seed_inode_index = cand.build_seed_inode_index(get_all_torrents(), cfg)
-    except Exception:
-        seed_inode_index = {}
+    seed_inode_index = {}
+    if cfg.get("transmission_host"):
+        try:
+            seed_inode_index = cand.build_seed_inode_index(get_all_torrents(), cfg)
+        except Exception:
+            pass
 
     result = []
     for c in merged.values():
