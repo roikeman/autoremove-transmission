@@ -132,7 +132,7 @@
     .btn-preflight:hover { opacity: .9; transform: scale(1.01); }
     .btn-preflight:disabled { opacity: .5; pointer-events: none; }
 
-    /* Bucket sections */
+    /* Unified library table */
     .bucket-section {
       background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
       overflow: hidden; margin-bottom: 1rem;
@@ -154,6 +154,7 @@
     .section-open .section-body { display: block; }
 
     .table-scroll { max-height: 460px; overflow-y: auto; overflow-x: auto; }
+    .library-table { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; }
     .table-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
     .table-scroll::-webkit-scrollbar-track { background: transparent; }
     .table-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
@@ -171,6 +172,7 @@
     tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
     tbody tr:last-child { border-bottom: none; }
     tbody tr:hover { background: rgba(255,255,255,0.03); }
+    tbody tr.not-eligible { opacity: .52; }
     tbody td { padding: .7rem 1rem; vertical-align: middle; font-size: .85rem; }
 
     .torrent-name { font-weight: 500; font-size: .88rem; line-height: 1.4; }
@@ -204,6 +206,12 @@
       color: #f0a0a0; border-radius: 5px; padding: .1em .45em; font-size: .68rem;
       white-space: nowrap; vertical-align: middle;
     }
+    .category-chip, .tracker-chip {
+      display: inline-block; font-size: .72rem; border-radius: 5px;
+      padding: .15em .5em; white-space: nowrap;
+    }
+    .category-chip { background: rgba(124,106,247,.13); color: #b4aafc; border: 1px solid rgba(124,106,247,.25); }
+    .tracker-chip { margin: .1rem .2rem .1rem 0; background: rgba(80,200,120,.12); color: #6fd98e; border: 1px solid rgba(80,200,120,.24); }
     input.row-check, input.select-all-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 
     .empty-state { padding: 2.5rem; text-align: center; color: var(--text-muted); font-size: .85rem; }
@@ -298,15 +306,24 @@
     <input type="number" id="idleDays" min="0" placeholder="90">
   </div>
   <div class="control-group">
+    <label for="showMode">Show</label>
+    <select id="showMode" onchange="onFiltersChanged(false)">
+      <option value="all">All library items</option>
+      <option value="eligible">Candidates only</option>
+    </select>
+  </div>
+  <div class="control-group">
     <label for="sortKey">Sort by</label>
     <select id="sortKey" onchange="onSortChange()">
       <option value="title">Title</option>
       <option value="kind">Kind</option>
+      <option value="category">Category</option>
       <option value="progress">Progress</option>
       <option value="size">Size</option>
       <option value="added">Added</option>
       <option value="last_played">Last played</option>
       <option value="owner">Owner</option>
+      <option value="tracker">Tracker</option>
     </select>
   </div>
   <button class="btn-refresh" id="sortDirBtn" onclick="toggleSortDir()" title="Toggle ascending/descending">
@@ -395,25 +412,21 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-const BUCKET_ORDER = ["A", "B", "C1", "C2", "C3"];
-
 let _candidates  = [];
 let _labels      = {};
 let _preticked   = [];
 let _checked     = new Set();
-let _sectionOpen = { A: true, B: true, C1: true, C2: true, C3: false };
 
-// Sorting is purely a client-side, within-bucket presentation concern --
-// it never changes which bucket a row belongs to (that drives pre-tick
-// rules) and never touches _checked, so re-sorting cannot change selection.
-let _sortKey = "size"; // size | title | added | last_played | progress
+// Sorting is purely client-side and never changes category or selection.
+let _sortKey = "size";
 let _sortDir = "desc"; // matches today's implicit "largest first" order
 
-// Rebuilt on every renderSections() call. Used so bulk select-all/none
+// Rebuilt on every renderTable() call. Used so bulk select-all/none
 // actions and the indeterminate-state refresh don't require re-rendering
 // the whole table on every checkbox tick.
 let _rowCheckboxEls = new Map(); // jf_id -> row checkbox element
-let _sectionMeta    = {};        // bucket -> { items, el: section select-all checkbox }
+let _visibleCandidates = [];
+let _filtersInitialized = false;
 
 let _lastPlanIds    = null; // Set of jf_ids the last successful /plan call covered
 let _lastPlanResult = null; // the /plan response body
@@ -504,11 +517,23 @@ async function loadStorage() {
   }
 }
 
-function formatDate(iso) {
+function daysSince(iso) {
   if (!iso) return null;
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+}
+
+function thresholdValue(id) {
+  const value = Number(document.getElementById(id).value);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function isEligible(c) {
+  const age = daysSince(c.added);
+  const idle = daysSince(c.last_played);
+  return age !== null && age >= thresholdValue("ageDays") &&
+    (idle === null || idle >= thresholdValue("idleDays"));
 }
 
 // Progress means watched/episodes for a series and progress_pct for a
@@ -583,6 +608,20 @@ function compareCandidates(a, b, key, dir) {
       return compareKind(a, b, dir);
     case "owner":
       return compareOwner(a, b, dir);
+    case "category": {
+      const result = (_labels[a.bucket] || a.bucket || "").localeCompare(
+        _labels[b.bucket] || b.bucket || "", undefined, { sensitivity: "base", numeric: true });
+      return result !== 0 ? (dir === "desc" ? -result : result) : titleTiebreak(a, b);
+    }
+    case "tracker": {
+      const av = (a.seed_trackers || []).join(", ") || null;
+      const bv = (b.seed_trackers || []).join(", ") || null;
+      if (av === null && bv === null) return titleTiebreak(a, b);
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      const result = av.localeCompare(bv, undefined, { sensitivity: "base", numeric: true });
+      return result !== 0 ? (dir === "desc" ? -result : result) : titleTiebreak(a, b);
+    }
     case "added":
       return compareNullableNumeric(toTimeOrNull(a.added), toTimeOrNull(b.added), dir);
     case "last_played":
@@ -652,8 +691,11 @@ async function loadCandidates() {
     _preticked    = data.preticked || [];
     _labels       = data.labels || {};
     _scanRequired = !!data.scan_required;
-    document.getElementById("ageDays").value  = data.age_days;
-    document.getElementById("idleDays").value = data.idle_days;
+    if (!_filtersInitialized) {
+      document.getElementById("ageDays").value  = data.age_days;
+      document.getElementById("idleDays").value = data.idle_days;
+      _filtersInitialized = true;
+    }
 
     if (scanInfo) {
       if (data.cached && data.scanned_at) {
@@ -667,14 +709,12 @@ async function loadCandidates() {
       }
     }
 
-    _checked = new Set(
-      _candidates.filter(c => _preticked.includes(c.bucket)).map(c => c.jf_id)
-    );
+    resetSelectionForFilters();
     _lastPlanIds = null;
     _lastPlanResult = null;
 
     errorBox.style.display = "none";
-    renderSections();
+    renderTable();
     updateSummary();
   } catch (err) {
     errorBox.textContent = "Error: " + err.message;
@@ -825,7 +865,7 @@ async function refreshScanStatusOnLoad() {
   }
 }
 
-// ── Render bucket sections ──────────────────────────────────────────────────
+// ── Render unified table ────────────────────────────────────────────────────
 // Single source of truth for the dropdown + Asc/Desc button: called on every
 // render so header clicks, the dropdown, and the direction button can never
 // disagree about the active sort key/direction.
@@ -838,7 +878,7 @@ function syncSortControls() {
   if (label) label.textContent = _sortDir === "desc" ? "Desc" : "Asc";
 }
 
-function renderSections() {
+function renderTable() {
   syncSortControls();
 
   const container = document.getElementById("sections");
@@ -847,18 +887,13 @@ function renderSections() {
   // Fresh render -- drop stale references to detached elements from the
   // previous render before rebuilding them.
   _rowCheckboxEls = new Map();
-  _sectionMeta = {};
-
-  const byBucket = {};
-  BUCKET_ORDER.forEach(b => byBucket[b] = []);
-  _candidates.forEach(c => { if (byBucket[c.bucket]) byBucket[c.bucket].push(c); });
 
   if (_candidates.length === 0) {
     const empty = el("div", { className: "empty-state" });
     if (_scanRequired) {
       empty.appendChild(icon("bi bi-search"));
       empty.appendChild(document.createElement("br"));
-      empty.appendChild(document.createTextNode("No scan has been run yet -- run one to find candidates."));
+      empty.appendChild(document.createTextNode("No full-library scan has been run yet -- run one to build the inventory."));
       empty.appendChild(document.createElement("br"));
       const runBtn = el("button", { className: "btn-refresh" });
       runBtn.style.marginTop = ".85rem";
@@ -868,35 +903,35 @@ function renderSections() {
       empty.appendChild(runBtn);
     } else {
       empty.appendChild(icon("bi bi-check-circle"));
-      empty.appendChild(document.createTextNode("No stale titles found."));
+      empty.appendChild(document.createTextNode("No library items found."));
     }
     container.appendChild(empty);
     return;
   }
 
-  BUCKET_ORDER.forEach(bucket => {
-    // Sorting applies WITHIN each bucket only -- bucket membership (and
-    // therefore which rows are pre-ticked) never changes here.
-    const items = byBucket[bucket].slice().sort((a, b) => compareCandidates(a, b, _sortKey, _sortDir));
-    container.appendChild(buildSection(bucket, items));
-  });
+  const showMode = document.getElementById("showMode").value;
+  _visibleCandidates = _candidates
+    .filter(c => showMode === "all" || isEligible(c))
+    .slice()
+    .sort((a, b) => compareCandidates(a, b, _sortKey, _sortDir));
+  container.appendChild(buildUnifiedTable(_visibleCandidates));
 }
 
 function onSortChange() {
   _sortKey = document.getElementById("sortKey").value;
-  renderSections();
+  renderTable();
   updateSummary();
 }
 
 function toggleSortDir() {
   _sortDir = _sortDir === "desc" ? "asc" : "desc";
-  renderSections(); // also syncs the dropdown + this button via syncSortControls()
+  renderTable(); // also syncs the dropdown + this button via syncSortControls()
   updateSummary();
 }
 
 // Clicking a column header: same key toggles direction; a different key
 // switches to it using that column's sensible default direction. Reuses
-// the exact same renderSections()/updateSummary() path as the dropdown and
+// the exact same renderTable()/updateSummary() path as the dropdown and
 // Asc/Desc button, so all three controls always agree.
 function onHeaderSort(key, defaultDir) {
   if (_sortKey === key) {
@@ -905,62 +940,8 @@ function onHeaderSort(key, defaultDir) {
     _sortKey = key;
     _sortDir = defaultDir;
   }
-  renderSections();
+  renderTable();
   updateSummary();
-}
-
-function buildSection(bucket, items) {
-  const section = el("div", { className: "bucket-section" + (_sectionOpen[bucket] ? " section-open" : "") });
-  section.dataset.bucket = bucket;
-
-  const totalSize = items.reduce((a, c) => a + (c.size_bytes || 0), 0);
-
-  const header = el("div", { className: "section-header" });
-  const titleWrap = el("div", { className: "section-title" });
-  titleWrap.appendChild(el("span", { text: _labels[bucket] || bucket }));
-  titleWrap.appendChild(el("span", {
-    className: "bucket-count",
-    text: `${items.length} item${items.length === 1 ? "" : "s"} · ${formatBytes(totalSize)}`
-  }));
-  header.appendChild(titleWrap);
-
-  const headerRight = el("div");
-  headerRight.style.display = "flex";
-  headerRight.style.alignItems = "center";
-  headerRight.style.gap = ".6rem";
-
-  const sectionSelectWrap = el("div", { className: "select-all-wrap" });
-  const sectionSelectCb = document.createElement("input");
-  sectionSelectCb.type = "checkbox";
-  sectionSelectCb.className = "select-all-check";
-  sectionSelectCb.title = `Select all / none in ${_labels[bucket] || bucket}`;
-  sectionSelectCb.disabled = items.length === 0;
-  // Clicking this checkbox must not also toggle the section's open/closed
-  // state -- the header itself listens for clicks to expand/collapse.
-  sectionSelectCb.addEventListener("click", e => e.stopPropagation());
-  sectionSelectCb.addEventListener("change", () => {
-    selectAllInBucket(bucket, sectionSelectCb.checked);
-  });
-  sectionSelectWrap.addEventListener("click", e => e.stopPropagation());
-  sectionSelectWrap.appendChild(sectionSelectCb);
-  headerRight.appendChild(sectionSelectWrap);
-  _sectionMeta[bucket] = { items: items, el: sectionSelectCb };
-
-  headerRight.appendChild(icon("bi bi-chevron-down section-chevron"));
-  header.appendChild(headerRight);
-
-  header.addEventListener("click", () => {
-    _sectionOpen[bucket] = !_sectionOpen[bucket];
-    section.classList.toggle("section-open", _sectionOpen[bucket]);
-  });
-
-  section.appendChild(header);
-
-  const body = el("div", { className: "section-body" });
-  body.appendChild(buildTable(bucket, items));
-  section.appendChild(body);
-
-  return section;
 }
 
 // `key` matches a _sortKey value (and a compareCandidates case) -- present
@@ -973,17 +954,19 @@ const TABLE_COLUMNS = [
   { text: "",            width: "36px"  },
   { text: "Title",       key: "title",       defaultDir: "asc"  },
   { text: "Kind",        width: "70px",  key: "kind",        defaultDir: "asc"  },
+  { text: "Category",    width: "130px", key: "category",    defaultDir: "asc"  },
   { text: "Progress",    width: "110px", key: "progress",    defaultDir: "desc" },
   { text: "Viewers",     width: "165px" },
   { text: "Size",        width: "100px", key: "size",        defaultDir: "desc" },
-  { text: "Added",       width: "110px", key: "added",       defaultDir: "desc" },
-  { text: "Last played", width: "110px", key: "last_played", defaultDir: "desc" },
+  { text: "Added ago",   width: "100px", key: "added",       defaultDir: "desc" },
+  { text: "Watched ago", width: "110px", key: "last_played", defaultDir: "desc" },
   { text: "Owner",       width: "120px", key: "owner",       defaultDir: "asc"  },
+  { text: "Seed tracker", width: "145px", key: "tracker",    defaultDir: "asc"  },
   { text: "Flags" },
 ];
 
-function buildTable(bucket, items) {
-  const scroll = el("div", { className: "table-scroll" });
+function buildUnifiedTable(items) {
+  const scroll = el("div", { className: "table-scroll library-table" });
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
@@ -1012,8 +995,8 @@ function buildTable(bucket, items) {
   if (items.length === 0) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 10;
-    td.appendChild(el("div", { className: "empty-state", text: "Nothing in this bucket." }));
+    td.colSpan = TABLE_COLUMNS.length;
+    td.appendChild(el("div", { className: "empty-state", text: "No items match these filters." }));
     tr.appendChild(td);
     tbody.appendChild(tr);
   } else {
@@ -1027,6 +1010,8 @@ function buildTable(bucket, items) {
 function buildRow(c) {
   const tr = document.createElement("tr");
   tr.dataset.jfid = c.jf_id;
+  const eligible = isEligible(c);
+  if (!eligible) tr.classList.add("not-eligible");
 
   // Checkbox
   const tdCheck = document.createElement("td");
@@ -1034,6 +1019,8 @@ function buildRow(c) {
   cb.type = "checkbox";
   cb.className = "row-check";
   cb.checked = _checked.has(c.jf_id);
+  cb.disabled = !eligible;
+  cb.title = eligible ? "Select for cleanup" : "Does not match the current age/idle filters";
   cb.addEventListener("change", () => {
     if (cb.checked) _checked.add(c.jf_id); else _checked.delete(c.jf_id);
     updateSummary();
@@ -1048,9 +1035,9 @@ function buildRow(c) {
   const nameDiv = el("div", { className: "torrent-name", text: c.title || "" });
   if ((c.flags || []).includes("frees-less-than-listed")) {
     const badge = el("span", { className: "hardlink-badge" });
-    badge.title = "Still held by a torrent -- deleting frees less than the listed size until confirmed by Preflight";
+    badge.title = "This path has hardlinked files -- deleting may free less than the listed size";
     badge.appendChild(icon("bi bi-link-45deg"));
-    badge.appendChild(document.createTextNode(" seeding"));
+    badge.appendChild(document.createTextNode(" hardlinked"));
     nameDiv.appendChild(badge);
   }
   const pathDiv = el("div", { className: "torrent-path", text: c.path || "" });
@@ -1060,6 +1047,11 @@ function buildRow(c) {
 
   // Kind
   tr.appendChild(el("td", { text: c.kind === "series" ? "Series" : "Movie" }));
+
+  // Category
+  const tdCategory = document.createElement("td");
+  tdCategory.appendChild(el("span", { className: "category-chip", text: _labels[c.bucket] || c.bucket || "—" }));
+  tr.appendChild(tdCategory);
 
   // Progress
   const tdProgress = document.createElement("td");
@@ -1095,12 +1087,14 @@ function buildRow(c) {
 
   // Added
   const tdAdded = document.createElement("td");
-  tdAdded.appendChild(el("span", { className: "date-text", text: formatDate(c.added) || "—" }));
+  const addedDays = daysSince(c.added);
+  tdAdded.appendChild(el("span", { className: "date-text", text: addedDays === null ? "—" : `${addedDays} days` }));
   tr.appendChild(tdAdded);
 
   // Last played
   const tdLast = document.createElement("td");
-  tdLast.appendChild(el("span", { className: "date-text", text: formatDate(c.last_played) || "never" }));
+  const watchedDays = daysSince(c.last_played);
+  tdLast.appendChild(el("span", { className: "date-text", text: watchedDays === null ? "never" : `${watchedDays} days` }));
   tr.appendChild(tdLast);
 
   // Owner
@@ -1111,6 +1105,20 @@ function buildRow(c) {
     tdOwner.appendChild(el("span", { className: "owner-none", text: "no *arr owner" }));
   }
   tr.appendChild(tdOwner);
+
+  // Tracker is only shown when this library payload is still held by a
+  // complete Transmission torrent, matched by inode during the scan.
+  const tdTracker = document.createElement("td");
+  if (c.is_seeding && (c.seed_trackers || []).length) {
+    c.seed_trackers.forEach(tracker => {
+      tdTracker.appendChild(el("span", { className: "tracker-chip", text: tracker }));
+    });
+  } else if (c.is_seeding) {
+    tdTracker.appendChild(el("span", { className: "tracker-chip", text: "Transmission" }));
+  } else {
+    tdTracker.appendChild(el("span", { className: "owner-none", text: "—" }));
+  }
+  tr.appendChild(tdTracker);
 
   // Flags
   const tdFlags = document.createElement("td");
@@ -1160,29 +1168,21 @@ function updateSummary() {
 function updateSelectAllControls() {
   const globalCb = document.getElementById("globalSelectAll");
   if (globalCb) {
-    const total = _candidates.length;
-    const selectedCount = _candidates.reduce((n, c) => n + (_checked.has(c.jf_id) ? 1 : 0), 0);
+    const selectable = _visibleCandidates.filter(isEligible);
+    const total = selectable.length;
+    const selectedCount = selectable.reduce((n, c) => n + (_checked.has(c.jf_id) ? 1 : 0), 0);
     globalCb.checked = total > 0 && selectedCount === total;
     globalCb.indeterminate = selectedCount > 0 && selectedCount < total;
+    globalCb.disabled = total === 0;
   }
-
-  Object.keys(_sectionMeta).forEach(bucket => {
-    const meta = _sectionMeta[bucket];
-    const total = meta.items.length;
-    const selectedCount = meta.items.reduce((n, c) => n + (_checked.has(c.jf_id) ? 1 : 0), 0);
-    meta.el.checked = total > 0 && selectedCount === total;
-    meta.el.indeterminate = selectedCount > 0 && selectedCount < total;
-  });
 }
 
 // ── Bulk selection ───────────────────────────────────────────────────────────
 // Both helpers mutate _checked directly and flip the already-rendered row
 // checkboxes via _rowCheckboxEls, rather than re-rendering the tables --
 // mirrors how a single row tick is handled, just applied to many rows.
-function selectAllInBucket(bucket, select) {
-  const meta = _sectionMeta[bucket];
-  if (!meta) return;
-  meta.items.forEach(c => {
+function selectAllGlobal(select) {
+  _visibleCandidates.filter(isEligible).forEach(c => {
     if (select) _checked.add(c.jf_id); else _checked.delete(c.jf_id);
     const rowCb = _rowCheckboxEls.get(c.jf_id);
     if (rowCb) rowCb.checked = select;
@@ -1190,16 +1190,19 @@ function selectAllInBucket(bucket, select) {
   updateSummary();
 }
 
-// Selects/deselects every visible candidate across every section -- this
-// intentionally includes C3 (Mid-watch) when the user explicitly asks for
-// "select all". C3 simply isn't pre-ticked on load; nothing here changes
-// that default.
-function selectAllGlobal(select) {
-  _candidates.forEach(c => {
-    if (select) _checked.add(c.jf_id); else _checked.delete(c.jf_id);
-    const rowCb = _rowCheckboxEls.get(c.jf_id);
-    if (rowCb) rowCb.checked = select;
-  });
+function resetSelectionForFilters() {
+  _checked = new Set(
+    _candidates
+      .filter(c => isEligible(c) && _preticked.includes(c.bucket))
+      .map(c => c.jf_id)
+  );
+  _lastPlanIds = null;
+  _lastPlanResult = null;
+}
+
+function onFiltersChanged(resetSelection = true) {
+  if (resetSelection) resetSelectionForFilters();
+  renderTable();
   updateSummary();
 }
 
@@ -1225,7 +1228,11 @@ async function runPreflight() {
     const resp = await fetch("/api/library/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jf_ids: [...requestedIds] }),
+      body: JSON.stringify({
+        jf_ids: [...requestedIds],
+        age_days: thresholdValue("ageDays"),
+        idle_days: thresholdValue("idleDays"),
+      }),
     });
     const data = await parseJsonResponse(resp);
 
@@ -1481,6 +1488,8 @@ function buildJournalEntry(entry) {
 document.getElementById("globalSelectAll").addEventListener("change", function () {
   selectAllGlobal(this.checked);
 });
+document.getElementById("ageDays").addEventListener("input", () => onFiltersChanged(true));
+document.getElementById("idleDays").addEventListener("input", () => onFiltersChanged(true));
 
 loadCandidates();
 loadStorage();

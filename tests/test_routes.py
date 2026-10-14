@@ -535,6 +535,30 @@ def test_plan_fails_clearly_without_cache(client):
     assert resp.status_code == 409
 
 
+def test_plan_revalidates_current_age_and_idle_filters(client):
+    """The full inventory may contain recent rows, but the server must not
+    trust a browser checkbox for a row that is outside the submitted filters."""
+    from datetime import datetime, timedelta
+    import config
+    import app as app_module
+    from cleanup.candidates import Candidate
+
+    config.save({"jellyfin_url": "https://jf", "jellyfin_api_key": "secret-key"})
+    recent = datetime.now() - timedelta(days=5)
+    candidate = Candidate(
+        jf_id="recent", kind="movie", title="Recent", path="/x/recent",
+        size_bytes=10, added=recent, last_played=recent, episodes=1, watched=0,
+        progress_pct=1.0, owner=None, owner_id=None, bucket="C2",
+    )
+    _seed_cache(app_module, [candidate])
+
+    resp = client.post("/api/library/plan", json={
+        "jf_ids": ["recent"], "age_days": 180, "idle_days": 90,
+    })
+    assert resp.status_code == 409
+    assert "filters" in resp.get_json()["error"]
+
+
 def test_execute_fails_clearly_when_cache_missing(client, monkeypatch):
     """A matching persisted plan exists, but the candidates cache does not
     (e.g. it was never populated) -- execute must fail with a clear 409,

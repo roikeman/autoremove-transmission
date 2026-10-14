@@ -31,6 +31,8 @@ app = Flask(__name__)
 # check the raw text should see the same characters config.py produces.
 app.json.ensure_ascii = False
 
+CANDIDATES_CACHE_SCHEMA = 2
+
 
 def _state_dir():
     """Directory next to the config file, for the lock and plan files.
@@ -236,7 +238,7 @@ def _run_scan_job(cfg, lock_fd):
             os.close(lock_fd)
 
 
-def _save_last_plan(jf_ids):
+def _save_last_plan(jf_ids, age_days=None, idle_days=None):
     """Persist the plan's selected id set to a file next to the config.
 
     Module-level Python state doesn't survive across gunicorn worker
@@ -251,7 +253,7 @@ def _save_last_plan(jf_ids):
     path = _plan_path()
     tmp_path = path + ".tmp"
     with open(tmp_path, "w") as f:
-        json.dump({"ids": sorted(jf_ids)}, f)
+        json.dump({"ids": sorted(jf_ids), "age_days": age_days, "idle_days": idle_days}, f)
     os.replace(tmp_path, path)
 
 
@@ -269,6 +271,19 @@ def _load_last_plan():
         return set(ids)
     except (OSError, ValueError):
         return set()
+
+
+def _load_last_plan_filters():
+    try:
+        with open(_plan_path()) as f:
+            data = json.load(f)
+        age = data.get("age_days")
+        idle = data.get("idle_days")
+        if age is None or idle is None:
+            return None, None
+        return int(age), int(idle)
+    except (OSError, ValueError, TypeError):
+        return None, None
 
 
 def _clear_last_plan():
@@ -294,6 +309,8 @@ def _save_candidates_cache(candidates, age_days, idle_days, scanned_at):
     path = _candidates_cache_path()
     tmp_path = path + ".tmp"
     data = {
+        "schema_version": CANDIDATES_CACHE_SCHEMA,
+        "complete_library": True,
         "candidates": [c.to_dict() for c in candidates],
         "age_days": age_days,
         "idle_days": idle_days,
@@ -315,6 +332,8 @@ def _load_candidates_cache():
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
+        return None
+    if data.get("schema_version") != CANDIDATES_CACHE_SCHEMA or data.get("complete_library") is not True:
         return None
     if not all(k in data for k in ("candidates", "age_days", "idle_days", "scanned_at")):
         return None
@@ -383,6 +402,12 @@ def _candidate_from_cached_dict(d):
     flags = d.get("flags") or []
     if not isinstance(flags, list):
         raise TypeError("flags must be a list")
+    seed_trackers = d.get("seed_trackers") or []
+    if not isinstance(seed_trackers, list) or not all(isinstance(v, str) for v in seed_trackers):
+        raise TypeError("seed_trackers must be a list of strings")
+    is_seeding = d.get("is_seeding", False)
+    if not isinstance(is_seeding, bool):
+        raise TypeError("is_seeding must be a bool")
 
     return cand.Candidate(
         jf_id=_str("jf_id"),
@@ -403,6 +428,8 @@ def _candidate_from_cached_dict(d):
         users_started=_int_default("users_started"),
         users_dropped=_int_default("users_dropped"),
         users_favorite=_int_default("users_favorite"),
+        is_seeding=is_seeding,
+        seed_trackers=list(seed_trackers),
     )
 
 
@@ -767,23 +794,21 @@ def _user_series_last_played(jf, user_id):
 
 
 def _scan(cfg, progress_cb=None):
-    """Build the full candidate list. Merges user data across all Jellyfin users.
+    """Build a full library inventory. Merges data across all Jellyfin users.
 
     `progress_cb`, when given, is called as progress_cb(done, total, phase)
     at cheap, honest checkpoints -- a single counter over the WHOLE scan's
     work, monotonically non-decreasing from 0 up to `total`, which never
     changes once the scan starts. `total` accounts for every phase: the
     Sonarr/Radarr owner-index build, BOTH per-user Jellyfin passes (see
-    below), and the final hardlinks pass -- so a caller polling this never
+    below), and the final storage/torrent pass -- so a caller polling this never
     sees the counter drop, unlike the two-per-user-pass bug this replaced
     (each pass used to report its own 0..total_users, so the second pass
     restarted low and looked like the scan had gone backwards). `phase` is
     a human-readable label naming what's happening right now: "sonarr",
     "jellyfin-played" (the played-episodes pass), "jellyfin-items" (the
-    items-fetch/merge pass), or "hardlinks". This is deliberately not a
-    percentage of *candidates found*: there is no cheap way to know in
-    advance how many will survive the stale filter -- `done`/`total` is
-    only ever a fraction of scan *work*, never of results.
+    items-fetch/merge pass), or "storage". This is deliberately a fraction
+    of scan *work*, never a percentage of library items discovered.
 
     Series episode counts and file sizes come from Sonarr's `statistics`
     object (episodeCount, sizeOnDisk) on the /api/v3/series response --
@@ -800,15 +825,13 @@ def _scan(cfg, progress_cb=None):
     itself (only on the Episode), so it is derived from
     _user_series_last_played -- one extra call per user, not per series.
     """
-    from datetime import datetime
-
     jf = JellyfinClient(cfg["jellyfin_url"], cfg["jellyfin_api_key"])
 
     # Users are fetched first (a cheap call) purely so total_units -- and
     # therefore every progress report for the rest of this scan -- can be
     # computed once and never change: 1 unit for the sonarr/radarr phase,
     # one unit per user for EACH of the two per-user passes below, and 1
-    # unit for the final hardlinks pass.
+    # unit for the final storage/torrent pass.
     users = jf.users()
     total_users = len(users)
     total_units = 2 * total_users + 2
@@ -872,19 +895,21 @@ def _scan(cfg, progress_cb=None):
         _report("jellyfin-items")
 
     done += 1
-    _report("hardlinks")
-    now = datetime.now()
-    age = int(cfg["age_days"])
-    idle = int(cfg["idle_days"])
+    _report("storage")
+
+    # Fetch Transmission once, then join its complete payloads to Jellyfin
+    # paths by inode.  A Transmission outage should not make the Jellyfin
+    # inventory disappear; it merely leaves seed/tracker metadata empty.
+    try:
+        seed_inode_index = cand.build_seed_inode_index(get_all_torrents(), cfg)
+    except Exception:
+        seed_inode_index = {}
 
     result = []
     for c in merged.values():
-        if not cand.is_stale(c.added, c.last_played, now, age, idle):
-            continue
-        # Hardlink check only runs for titles that actually survive the
-        # stale filter, and only stats this one candidate's own path (never
-        # the whole library) -- see cand.path_has_hardlink.
-        has_hardlink = cand.path_has_hardlink(c.path)
+        has_hardlink, is_seeding, trackers = cand.inspect_candidate_storage(c.path, seed_inode_index)
+        c.is_seeding = is_seeding
+        c.seed_trackers = trackers
         # quality_flags recomputes the two flags it owns (added-date and
         # hardlink); any other flag already on the candidate (e.g.
         # "episode-data-unavailable") is a distinct data-quality fact that
@@ -1061,7 +1086,7 @@ def api_candidates():
     })
 
 
-def _selected(cfg, jf_ids):
+def _selected(cfg, jf_ids, age_days=None, idle_days=None):
     # Design decision: plan/execute deliberately act on the SAME cached
     # candidate set the user reviewed via GET /api/library/candidates,
     # rather than triggering their own fresh (multi-minute) Jellyfin scan.
@@ -1082,7 +1107,14 @@ def _selected(cfg, jf_ids):
     if found is None:
         return None
 
-    return [c for c in found if c.jf_id in wanted]
+    selection = [c for c in found if c.jf_id in wanted]
+    if age_days is None or idle_days is None:
+        return selection
+    now = datetime.now()
+    return [
+        c for c in selection
+        if cand.is_stale(c.added, c.last_played, now, int(age_days), int(idle_days))
+    ]
 
 
 def _update_candidates_cache_after_execute(results):
@@ -1133,9 +1165,19 @@ def api_plan():
     if not jf_ids:
         return jsonify({"error": "no titles selected"}), 400
 
-    selection = _selected(cfg, jf_ids)
+    try:
+        age_days = int(body["age_days"]) if "age_days" in body else None
+        idle_days = int(body["idle_days"]) if "idle_days" in body else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "age_days and idle_days must be integers"}), 400
+    if (age_days is None) != (idle_days is None):
+        return jsonify({"error": "age_days and idle_days must be provided together"}), 400
+
+    selection = _selected(cfg, jf_ids, age_days, idle_days)
     if selection is None:
         return jsonify({"error": "no scan available yet; run a scan first"}), 409
+    if {c.jf_id for c in selection} != set(jf_ids):
+        return jsonify({"error": "one or more selected titles no longer match the age/idle filters"}), 409
 
     try:
         result = pipeline.plan(selection, cfg)
@@ -1144,7 +1186,7 @@ def api_plan():
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
-    _save_last_plan({c.jf_id for c in selection})
+    _save_last_plan({c.jf_id for c in selection}, age_days, idle_days)
     return jsonify(result)
 
 
@@ -1168,9 +1210,12 @@ def api_execute():
         if not acquired:
             return jsonify({"error": "a cleanup run is already in progress"}), 409
 
-        selection = _selected(cfg, jf_ids)
+        age_days, idle_days = _load_last_plan_filters()
+        selection = _selected(cfg, jf_ids, age_days, idle_days)
         if selection is None:
             return jsonify({"error": "no scan available yet; run a scan first"}), 409
+        if {c.jf_id for c in selection} != set(jf_ids):
+            return jsonify({"error": "one or more selected titles no longer match the preflight filters"}), 409
 
         try:
             # Note: execute() re-checks the blast-radius caps itself, so a second

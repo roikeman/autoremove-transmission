@@ -427,3 +427,40 @@ def test_path_has_hardlink_false_for_missing_path():
 
 def test_path_has_hardlink_false_for_empty_path():
     assert C.path_has_hardlink("") is False
+
+
+def test_seed_inode_index_matches_hardlinked_library_file_and_tracker(tmp_path):
+    payload = tmp_path / "downloads" / "movie.mkv"
+    payload.parent.mkdir()
+    payload.write_bytes(b"media")
+    library = tmp_path / "library.mkv"
+    os.link(payload, library)
+    torrents = [{
+        "percentDone": 1,
+        "downloadDir": str(payload.parent),
+        "files": [{"name": payload.name}],
+        "trackers": [{"announce": "https://tracker.example/announce"}],
+    }]
+
+    index = C.build_seed_inode_index(torrents, {"path_prefix_map": {}})
+    has_link, is_seeding, trackers = C.inspect_candidate_storage(str(library), index)
+
+    assert has_link is True
+    assert is_seeding is True
+    assert trackers == ["tracker.example"]
+
+
+def test_incomplete_torrent_is_not_reported_as_seeding(tmp_path):
+    payload = tmp_path / "partial.mkv"
+    payload.write_bytes(b"partial")
+    torrents = [{
+        "percentDone": 0.5,
+        "downloadDir": str(tmp_path),
+        "files": [{"name": payload.name}],
+        "trackers": [{"announce": "udp://tracker.example:80/announce"}],
+    }]
+
+    index = C.build_seed_inode_index(torrents, {"path_prefix_map": {}})
+    _has_link, is_seeding, trackers = C.inspect_candidate_storage(str(payload), index)
+    assert is_seeding is False
+    assert trackers == []

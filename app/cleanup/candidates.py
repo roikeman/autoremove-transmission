@@ -2,6 +2,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from cleanup import buckets
 
@@ -34,6 +35,8 @@ class Candidate:
     users_started: int = 0
     users_dropped: int = 0
     users_favorite: int = 0
+    is_seeding: bool = False
+    seed_trackers: list = field(default_factory=list)
 
     def to_dict(self):
         return {
@@ -55,6 +58,8 @@ class Candidate:
             "users_started": self.users_started,
             "users_dropped": self.users_dropped,
             "users_favorite": self.users_favorite,
+            "is_seeding": self.is_seeding,
+            "seed_trackers": list(self.seed_trackers),
         }
 
 
@@ -198,6 +203,80 @@ def path_has_hardlink(path):
         return False
     except OSError:
         return False
+
+
+def _tracker_name(tracker):
+    """Return a compact tracker hostname from a Transmission tracker row."""
+    announce = (tracker or {}).get("announce") or ""
+    parsed = urlparse(announce)
+    return parsed.hostname or parsed.path.split("/")[0] or announce
+
+
+def build_seed_inode_index(torrents, cfg):
+    """Map payload inodes belonging to complete torrents to tracker names.
+
+    Jellyfin and Transmission frequently see the same bytes through different
+    paths or hardlinks.  Device+inode identity is therefore the reliable join;
+    title/path string matching is deliberately avoided.
+    """
+    index = {}
+    for torrent in torrents or []:
+        if float(torrent.get("percentDone") or 0) < 1:
+            continue
+        trackers = sorted({
+            name for name in (_tracker_name(t) for t in torrent.get("trackers") or []) if name
+        })
+        download_dir = torrent.get("downloadDir") or ""
+        try:
+            from clients.transmission import normalize_path
+            download_dir = normalize_path(download_dir, cfg)
+        except Exception:
+            pass
+        for entry in torrent.get("files") or []:
+            name = entry.get("name")
+            if not name:
+                continue
+            try:
+                stat = os.stat(os.path.join(download_dir, name))
+            except OSError:
+                continue
+            key = (stat.st_dev, stat.st_ino)
+            index.setdefault(key, set()).add("__seed__")
+            index.setdefault(key, set()).update(trackers)
+    return index
+
+
+def inspect_candidate_storage(path, seed_inode_index=None):
+    """Return ``(has_hardlink, in_complete_torrent, trackers)`` in one walk."""
+    seed_inode_index = seed_inode_index or {}
+    has_hardlink = False
+    in_complete_torrent = False
+    trackers = set()
+
+    def inspect_file(file_path):
+        nonlocal has_hardlink, in_complete_torrent
+        try:
+            stat = os.stat(file_path)
+        except OSError:
+            return
+        has_hardlink = has_hardlink or stat.st_nlink > 1
+        matches = seed_inode_index.get((stat.st_dev, stat.st_ino), set())
+        if "__seed__" in matches:
+            in_complete_torrent = True
+        trackers.update(name for name in matches if name != "__seed__")
+
+    if not path:
+        return False, False, []
+    try:
+        if os.path.isfile(path):
+            inspect_file(path)
+        elif os.path.isdir(path):
+            for dirpath, _dirs, filenames in os.walk(path):
+                for name in filenames:
+                    inspect_file(os.path.join(dirpath, name))
+    except OSError:
+        pass
+    return has_hardlink, in_complete_torrent, sorted(trackers)
 
 
 def guard_unavailable_bucket(bucket, flags):

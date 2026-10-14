@@ -178,7 +178,7 @@ def test_last_played_derived_from_episode_playback_max_across_users(monkeypatch)
 
 # --- consequence 1: idle rule must no longer be inert for series -----------
 
-def test_series_played_recently_by_any_user_is_not_stale(monkeypatch):
+def test_series_played_recently_by_any_user_stays_in_full_library_inventory(monkeypatch):
     app_module = _patch(monkeypatch)
     path = "/share/series/RecentShow"
     item = _series_item("recent1", "Recent Show", path, unplayed=5)
@@ -190,11 +190,13 @@ def test_series_played_recently_by_any_user_is_not_stale(monkeypatch):
     )
     _FakeArr.reset(sonarr_items=[_sonarr_series(1, path, episode_count=10, size_on_disk=1)])
 
-    # idle_days=90 (default); a play 5 days ago must make this NOT stale, so
-    # it must not appear as a deletion candidate at all -- before the fix,
-    # last_played stayed None here and is_stale() returned True on age alone.
+    # A full-library scan now retains recent titles so changing idle_days in
+    # the browser can update eligibility immediately without another scan.
     result = app_module._scan(_base_cfg())
-    assert result == []
+    assert len(result) == 1
+    assert result[0].last_played is not None
+    assert app_module.cand.is_stale(result[0].added, result[0].last_played,
+                                    datetime.now(), 180, 90) is False
 
 
 # --- consequence 2: bucket C2 (sampled, dropped) reachable again -----------

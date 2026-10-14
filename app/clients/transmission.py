@@ -60,7 +60,8 @@ def get_all_torrents():
     result = rpc_call("torrent-get", {
         "fields": ["id", "name", "totalSize", "downloadDir", "files", "addedDate",
                    "trackers", "percentDone", "uploadRatio", "secondsSeeding",
-                   "seedRatioLimit", "seedRatioMode"],
+                   "seedRatioLimit", "seedRatioMode", "status", "rateUpload",
+                   "activityDate"],
     })
     return result["arguments"]["torrents"]
 
