@@ -25,7 +25,24 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r app/requirements-dev.txt
-      - run: pytest -v
+      - name: Test library inventory
+        run: >-
+          pytest -v
+          tests/test_candidates.py
+          tests/test_routes.py
+          tests/test_scan_progress.py
+          tests/test_scan_sonarr_stats.py
+          tests/test_series_last_played.py
+          tests/test_storage.py
+      - name: Test remaining suite
+        run: >-
+          pytest -v
+          --ignore=tests/test_candidates.py
+          --ignore=tests/test_routes.py
+          --ignore=tests/test_scan_progress.py
+          --ignore=tests/test_scan_sonarr_stats.py
+          --ignore=tests/test_series_last_played.py
+          --ignore=tests/test_storage.py
 
   build-and-push:
     needs: test
