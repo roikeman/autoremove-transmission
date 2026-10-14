@@ -25,15 +25,18 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r app/requirements-dev.txt
-      - name: Test library inventory
-        run: >-
-          pytest -v
-          tests/test_candidates.py
-          tests/test_routes.py
-          tests/test_scan_progress.py
-          tests/test_scan_sonarr_stats.py
-          tests/test_series_last_played.py
-          tests/test_storage.py
+      - name: Test candidates
+        run: pytest -v tests/test_candidates.py
+      - name: Test routes
+        run: pytest -v tests/test_routes.py
+      - name: Test scan progress
+        run: pytest -v tests/test_scan_progress.py
+      - name: Test scan data
+        run: pytest -v tests/test_scan_sonarr_stats.py
+      - name: Test series playback
+        run: pytest -v tests/test_series_last_played.py
+      - name: Test storage
+        run: pytest -v tests/test_storage.py
       - name: Test remaining suite
         run: >-
           pytest -v
