@@ -300,6 +300,7 @@ def _setup_counting_jellyfin(client, monkeypatch):
     _CountingJellyfin.calls = 0
     _CountingJellyfin.refresh_calls = 0
     monkeypatch.setattr(app_module, "JellyfinClient", _CountingJellyfin)
+    monkeypatch.setattr(app_module, "get_all_torrents", lambda: [])
     return app_module
 
 
@@ -442,7 +443,7 @@ def test_scan_endpoint_reports_progress_and_heartbeat(client, monkeypatch):
     assert resp.status_code == 202
     body = resp.get_json()
     assert body["progress"]["phase"] in (
-        "sonarr", "jellyfin-played", "jellyfin-items", "hardlinks")
+        "sonarr", "jellyfin-played", "jellyfin-items", "storage")
     assert body["heartbeat"]
 
     status = _wait_for_scan_to_finish(client)

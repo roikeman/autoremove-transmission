@@ -25,29 +25,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r app/requirements-dev.txt
-      - name: Test candidates
-        run: pytest -v tests/test_candidates.py
-      - name: Test filter revalidation route
-        run: pytest -v tests/test_routes.py::test_plan_revalidates_current_age_and_idle_filters
-      - name: Test remaining routes
-        run: pytest -v tests/test_routes.py -k 'not test_plan_revalidates_current_age_and_idle_filters'
-      - name: Test scan progress
-        run: pytest -v tests/test_scan_progress.py
-      - name: Test scan data
-        run: pytest -v tests/test_scan_sonarr_stats.py
-      - name: Test series playback
-        run: pytest -v tests/test_series_last_played.py
-      - name: Test storage
-        run: pytest -v tests/test_storage.py
-      - name: Test remaining suite
-        run: >-
-          pytest -v
-          --ignore=tests/test_candidates.py
-          --ignore=tests/test_routes.py
-          --ignore=tests/test_scan_progress.py
-          --ignore=tests/test_scan_sonarr_stats.py
-          --ignore=tests/test_series_last_played.py
-          --ignore=tests/test_storage.py
+      - run: pytest -v
 
   build-and-push:
     needs: test
