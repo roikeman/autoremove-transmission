@@ -130,6 +130,10 @@ def test_from_series_reads_user_favorite():
     assert C.from_series(item, {}).users_favorite == 1
 
 
+def test_from_series_reads_community_rating():
+    assert C.from_series(_series_item(CommunityRating=8.4), {}).community_rating == 8.4
+
+
 def test_from_series_uses_date_last_media_added():
     c = C.from_series(_series_item(), {})
     assert c.added == datetime(2025, 2, 1)
@@ -242,6 +246,11 @@ def test_from_movie_reads_user_favorite():
     item = _movie_item()
     item["UserData"]["IsFavorite"] = True
     assert C.from_movie(item, {}).users_favorite == 1
+
+
+def test_from_movie_reads_community_rating_and_ignores_invalid_value():
+    assert C.from_movie(_movie_item(CommunityRating="7.9"), {}).community_rating == 7.9
+    assert C.from_movie(_movie_item(CommunityRating="unknown"), {}).community_rating is None
 
 
 def test_from_movie_sampled_has_no_resume_point():

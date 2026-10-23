@@ -19,6 +19,9 @@ def test_defaults_include_new_services(tmp_path, monkeypatch):
     assert cfg["min_seed_seconds"] == 86400
     assert cfg["jellyfin_url"] == ""
     assert cfg["library_roots"] == ["/share"]
+    assert cfg["score_sampled"] == 80
+    assert cfg["score_seed_adjustment"] == -5
+    assert cfg["score_rating_pivot"] == 7
 
 
 def test_env_overrides_api_key(tmp_path, monkeypatch):
@@ -63,3 +66,15 @@ def test_save_rejects_unknown_keys(tmp_path, monkeypatch):
     saved = config.save({"nonsense": 1, "age_days": 45})
     assert "nonsense" not in saved
     assert saved["age_days"] == 45
+
+
+def test_save_parses_configurable_scoring_numbers(tmp_path, monkeypatch):
+    _cfg_file(tmp_path, monkeypatch)
+    saved = config.save({
+        "score_sampled": "72.5",
+        "score_seed_adjustment": "-8",
+        "score_rating_pivot": "7.3",
+    })
+    assert saved["score_sampled"] == 72.5
+    assert saved["score_seed_adjustment"] == -8.0
+    assert saved["score_rating_pivot"] == 7.3

@@ -212,6 +212,13 @@
     }
     .category-chip { background: rgba(124,106,247,.13); color: #b4aafc; border: 1px solid rgba(124,106,247,.25); }
     .tracker-chip { margin: .1rem .2rem .1rem 0; background: rgba(80,200,120,.12); color: #6fd98e; border: 1px solid rgba(80,200,120,.24); }
+    .score-badge {
+      display: inline-block; min-width: 3.2em; text-align: center;
+      background: rgba(224,92,92,.13); border: 1px solid rgba(224,92,92,.28);
+      color: #f0a0a0; border-radius: 6px; padding: .22em .55em;
+      font-size: .8rem; font-weight: 700; font-variant-numeric: tabular-nums;
+    }
+    .score-rating { display: block; margin-top: .25rem; color: var(--text-muted); font-size: .68rem; white-space: nowrap; }
     input.row-check, input.select-all-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 
     .empty-state { padding: 2.5rem; text-align: center; color: var(--text-muted); font-size: .85rem; }
@@ -318,6 +325,7 @@
       <option value="title">Title</option>
       <option value="kind">Kind</option>
       <option value="category">Category</option>
+      <option value="recommendation_score">Recommendation score</option>
       <option value="progress">Progress</option>
       <option value="size">Size</option>
       <option value="added">Added</option>
@@ -418,8 +426,8 @@ let _preticked   = [];
 let _checked     = new Set();
 
 // Sorting is purely client-side and never changes category or selection.
-let _sortKey = "size";
-let _sortDir = "desc"; // matches today's implicit "largest first" order
+let _sortKey = "recommendation_score";
+let _sortDir = "desc"; // highest deletion recommendation first
 
 // Rebuilt on every renderTable() call. Used so bulk select-all/none
 // actions and the indeterminate-state refresh don't require re-rendering
@@ -613,6 +621,8 @@ function compareCandidates(a, b, key, dir) {
         _labels[b.bucket] || b.bucket || "", undefined, { sensitivity: "base", numeric: true });
       return result !== 0 ? (dir === "desc" ? -result : result) : titleTiebreak(a, b);
     }
+    case "recommendation_score":
+      return compareNullableNumeric(a.recommendation_score, b.recommendation_score, dir) || titleTiebreak(a, b);
     case "tracker": {
       const av = (a.seed_trackers || []).join(", ") || null;
       const bv = (b.seed_trackers || []).join(", ") || null;
@@ -955,6 +965,7 @@ const TABLE_COLUMNS = [
   { text: "Title",       key: "title",       defaultDir: "asc"  },
   { text: "Kind",        width: "70px",  key: "kind",        defaultDir: "asc"  },
   { text: "Category",    width: "130px", key: "category",    defaultDir: "asc"  },
+  { text: "Score",       width: "90px",  key: "recommendation_score", defaultDir: "desc" },
   { text: "Progress",    width: "110px", key: "progress",    defaultDir: "desc" },
   { text: "Viewers",     width: "165px" },
   { text: "Size",        width: "100px", key: "size",        defaultDir: "desc" },
@@ -1052,6 +1063,26 @@ function buildRow(c) {
   const tdCategory = document.createElement("td");
   tdCategory.appendChild(el("span", { className: "category-chip", text: _labels[c.bucket] || c.bucket || "—" }));
   tr.appendChild(tdCategory);
+
+  // Higher means a stronger deletion recommendation. Keep the contribution
+  // list in the native tooltip so the score is explainable without widening
+  // an already dense table.
+  const tdScore = document.createElement("td");
+  const score = c.recommendation_score;
+  const scoreBadge = el("span", {
+    className: "score-badge",
+    text: score === null || score === undefined ? "—" : String(score),
+  });
+  const breakdown = (c.recommendation_breakdown || []).map(part => {
+    const points = Number(part.points) || 0;
+    return `${part.label}: ${points > 0 ? "+" : ""}${points}`;
+  });
+  scoreBadge.title = ["Higher means delete sooner", ...breakdown].join("\n");
+  tdScore.appendChild(scoreBadge);
+  if (c.community_rating !== null && c.community_rating !== undefined) {
+    tdScore.appendChild(el("span", { className: "score-rating", text: `rating ${c.community_rating}` }));
+  }
+  tr.appendChild(tdScore);
 
   // Progress
   const tdProgress = document.createElement("td");

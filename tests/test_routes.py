@@ -355,6 +355,30 @@ def test_candidates_serves_existing_cache_without_scanning(client, monkeypatch):
     assert body["scan_required"] is False
     assert body["cached"] is True
     assert len(body["candidates"]) == 1
+    assert body["candidates"][0]["recommendation_score"] == 60
+    assert body["candidates"][0]["recommendation_breakdown"]
+    assert _CountingJellyfin.calls == 0
+
+
+def test_candidate_score_uses_new_settings_without_rescan(client, monkeypatch):
+    app_module = _setup_counting_jellyfin(client, monkeypatch)
+    from cleanup.candidates import Candidate
+    import config
+
+    candidate = Candidate(
+        jf_id="m1", kind="movie", title="Old Movie", path="/x/old-movie.mkv",
+        size_bytes=12345, added=None, last_played=None, episodes=1, watched=0,
+        progress_pct=0.0, owner=None, owner_id=None, bucket="C2",
+        community_rating=8.0,
+    )
+    _seed_cache(app_module, [candidate])
+
+    first = client.get("/api/library/candidates").get_json()["candidates"][0]
+    assert first["recommendation_score"] == 75
+
+    config.save({"score_sampled": 40, "score_rating_points_per_point": 10})
+    second = client.get("/api/library/candidates").get_json()["candidates"][0]
+    assert second["recommendation_score"] == 30
     assert _CountingJellyfin.calls == 0
 
 

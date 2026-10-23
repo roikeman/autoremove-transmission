@@ -27,6 +27,7 @@ def test_items_requests_required_fields(client):
     assert "IncludeItemTypes=Series" in qs
     assert "Recursive=true" in qs
     assert "DateLastMediaAdded" in qs
+    assert "CommunityRating" in qs
 
 
 @responses.activate

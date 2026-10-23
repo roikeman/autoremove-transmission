@@ -319,6 +319,60 @@
     </div>
   </div>
 
+  <!-- Recommendation scoring -->
+  <div class="settings-card">
+    <div class="settings-card-header"><i class="bi bi-speedometer2"></i> Recommendation Scoring</div>
+    <div class="settings-card-body">
+      <span class="field-desc">Higher scores mean “delete sooner”. Age and idle remain hard eligibility filters; these values only rank eligible titles.</span>
+      <div class="field-row">
+        <div class="field-group">
+          <label class="field-label">Never opened</label>
+          <input type="number" id="score_never_opened" step="0.1" placeholder="60">
+        </div>
+        <div class="field-group">
+          <label class="field-label">Fully watched</label>
+          <input type="number" id="score_fully_watched" step="0.1" placeholder="10">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field-group">
+          <label class="field-label">Near complete</label>
+          <input type="number" id="score_near_complete" step="0.1" placeholder="20">
+        </div>
+        <div class="field-group">
+          <label class="field-label">Sampled / dropped</label>
+          <input type="number" id="score_sampled" step="0.1" placeholder="80">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field-group">
+          <label class="field-label">Mid-watch</label>
+          <input type="number" id="score_mid_watch" step="0.1" placeholder="70">
+        </div>
+        <div class="field-group">
+          <label class="field-label">Seed adjustment</label>
+          <input type="number" id="score_seed_adjustment" step="0.1" placeholder="-5">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field-group">
+          <label class="field-label">Favorite adjustment</label>
+          <input type="number" id="score_favorite_adjustment" step="0.1" placeholder="-100">
+        </div>
+        <div class="field-group">
+          <label class="field-label">Audience rating pivot</label>
+          <input type="number" id="score_rating_pivot" step="0.1" placeholder="7">
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Points per audience-rating point</label>
+        <input type="number" id="score_rating_points_per_point" step="0.1" placeholder="5">
+        <span class="field-desc">Rating adjustment = (pivot − audience rating) × points. With pivot 7 and weight 5, rating 9 subtracts 10 points and rating 5 adds 10.</span>
+      </div>
+      <span class="field-desc">Negative adjustments protect a title. The score updates immediately from the existing library cache after saving; no rescan is required.</span>
+    </div>
+  </div>
+
   <!-- Save -->
   <button class="btn-save" id="saveBtn" onclick="saveSettings()">
     <i class="bi bi-floppy"></i> Save settings
@@ -328,6 +382,18 @@
 </main>
 
 <script>
+const SCORING_KEYS = [
+  "score_never_opened",
+  "score_fully_watched",
+  "score_near_complete",
+  "score_sampled",
+  "score_mid_watch",
+  "score_seed_adjustment",
+  "score_favorite_adjustment",
+  "score_rating_pivot",
+  "score_rating_points_per_point",
+];
+
 // A slow/unreachable backend call can be killed by a browser or reverse-proxy
 // timeout before it produces a JSON body -- the caller then gets an
 // HTML/plain-text gateway error page instead, and a bare `resp.json()`
@@ -386,6 +452,9 @@ async function loadSettings() {
   document.getElementById("seed_guard").checked       = !!d.seed_guard;
   document.getElementById("min_seed_seconds").value   = d.min_seed_seconds ?? "";
   document.getElementById("library_roots").value      = (d.library_roots || []).join("\n");
+  SCORING_KEYS.forEach(key => {
+    document.getElementById(key).value = d[key] ?? "";
+  });
 }
 
 async function testServiceConnection(service) {
@@ -497,6 +566,9 @@ async function saveSettings() {
     library_roots:         document.getElementById("library_roots").value
                              .split("\n").map(p => p.trim()).filter(p => p),
   };
+  SCORING_KEYS.forEach(key => {
+    payload[key] = document.getElementById(key).value.trim();
+  });
 
   try {
     const resp = await fetch("/api/settings", {

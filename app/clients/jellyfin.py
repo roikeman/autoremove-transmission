@@ -1,6 +1,6 @@
 import requests
 
-ITEM_FIELDS = "Path,DateCreated,DateLastMediaAdded,MediaSources"
+ITEM_FIELDS = "Path,DateCreated,DateLastMediaAdded,MediaSources,CommunityRating"
 
 
 class JellyfinClient:

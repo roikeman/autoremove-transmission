@@ -22,7 +22,7 @@ from clients.transmission import (
 from clients.jellyfin import JellyfinClient
 from clients.arr import ArrClient
 from clients import transmission as tx
-from cleanup import buckets, candidates as cand, journal, pipeline
+from cleanup import buckets, candidates as cand, journal, pipeline, scoring
 
 app = Flask(__name__)
 # Masked secrets use literal bullet characters (config.MASK); without this,
@@ -423,6 +423,9 @@ def _candidate_from_cached_dict(d):
         owner=_opt_str("owner"),
         owner_id=_opt_int("owner_id"),
         bucket=_str("bucket"),
+        community_rating=(
+            _num("community_rating") if d.get("community_rating") is not None else None
+        ),
         flags=list(flags),
         users_finished=_int_default("users_finished"),
         users_started=_int_default("users_started"),
@@ -1077,7 +1080,9 @@ def api_candidates():
 
     found.sort(key=lambda c: c.size_bytes, reverse=True)
     return jsonify({
-        "candidates": [c.to_dict() for c in found],
+        "candidates": [
+            {**c.to_dict(), **scoring.recommendation(c, cfg)} for c in found
+        ],
         "preticked": sorted(buckets.PRETICKED),
         "labels": buckets.LABELS,
         "age_days": cached["age_days"],

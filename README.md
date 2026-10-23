@@ -125,6 +125,22 @@ deletion by default risks deleting something someone is still actively
 watching. C3 titles can still be selected manually, but the tool never
 does it for you.
 
+### Recommendation score
+
+The library table includes an explainable recommendation score. A higher
+number means the title is a stronger candidate for deletion; age and idle
+remain hard eligibility gates and are not part of the score. By default,
+sampled/dropped and stale mid-watch titles rank highest, fully watched titles
+rank lowest, seeding lowers the score slightly, favorites lower it strongly,
+and a high Jellyfin community rating lowers it further.
+
+Every arbitrary scoring value is editable under **Settings → Recommendation
+Scoring**: all five watch-state base scores, the seed and favorite
+adjustments, the audience-rating pivot, and the number of points applied per
+rating point. Scores are calculated when the table is loaded, so changing a
+weight updates the existing scan cache without requiring a rescan. Hover a
+score in the table to see its contribution breakdown.
+
 ### Deletion order
 
 When a run executes, each selected title is deleted in this order:

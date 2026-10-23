@@ -24,6 +24,7 @@ class Candidate:
     owner: str
     owner_id: int
     bucket: str
+    community_rating: float = None
     flags: list = field(default_factory=list)
     # Per-title viewer breakdown across every Jellyfin user (see
     # classify_viewer below for the exact finished/started/never-opened
@@ -53,6 +54,7 @@ class Candidate:
             "owner": self.owner,
             "owner_id": self.owner_id,
             "bucket": self.bucket,
+            "community_rating": self.community_rating,
             "flags": list(self.flags),
             "users_finished": self.users_finished,
             "users_started": self.users_started,
@@ -125,6 +127,17 @@ def _size_of(item):
         if source.get("Size"):
             return int(source["Size"])
     return int(item.get("Size") or 0)
+
+
+def _community_rating(item):
+    """Return Jellyfin's audience/community rating, or None if unusable."""
+    value = item.get("CommunityRating")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def sonarr_stats_by_id(sonarr_items):
@@ -421,6 +434,7 @@ def from_series(item, owner_index, episodes=None, watched=None, size_bytes=None,
         owner=owner,
         owner_id=owner_id,
         bucket=bucket,
+        community_rating=_community_rating(item),
         flags=flags,
         users_favorite=1 if user.get("IsFavorite") else 0,
     )
@@ -451,6 +465,7 @@ def from_movie(item, owner_index, size_bytes=None):
         owner=owner,
         owner_id=owner_id,
         bucket=buckets.classify("movie", 1, watched, last_played, progress),
+        community_rating=_community_rating(item),
         flags=buckets.quality_flags(added, last_played, False),
         users_favorite=1 if user.get("IsFavorite") else 0,
     )
